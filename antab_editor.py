@@ -333,6 +333,8 @@ class AntabGui:
         for name in self.block.index:
             self.index_list.insert(tk.END, name)
         self.index_list.selection_clear(0, tk.END)
+        if self.block.index:
+            self.index_list.selection_set(0)
         self.series_cache.clear()
         self.selected_masks.clear()
 
@@ -628,21 +630,38 @@ class AntabGui:
         window_days = self._smooth_window_days() if self.smooth_enabled.get() else None
         method = self._smooth_method_key()
 
+        valid_x_mask = np.zeros(len(self.xs), dtype=bool)
+        y_values = []
         for index_name in selected:
             ys = self._build_series(index_name)
-            line, = self.ax.plot(self.xs, ys, linewidth=1.2, alpha=0.8, label=index_name)
-            scatter = self.ax.scatter(self.xs, ys, s=22, picker=5)
+            if np.isfinite(ys).any():
+                valid_x_mask |= np.isfinite(ys)
+                y_values.append(ys[np.isfinite(ys)])
+            scatter = self.ax.scatter(self.xs, ys, s=12, picker=5, label=index_name, marker="o", alpha=0.9)
             scatter.set_gid(index_name)
-            self.series_artists[index_name] = (line, scatter)
+            self.series_artists[index_name] = (None, scatter)
             if window_days is not None:
                 smooth = self._smooth_series(index_name, window_days, method)
                 if np.isfinite(smooth).any():
+                    facecolors = scatter.get_facecolors()
+                    color = facecolors[0] if facecolors is not None and len(facecolors) > 0 else None
                     self.ax.plot(self.xs, smooth, linestyle="--", linewidth=1.2, alpha=0.9,
-                                 color=line.get_color(), label=f"_{index_name}_smooth")
+                                 color=color, label=f"_{index_name}_smooth")
 
         self.ax.set_xlabel("Day of Year (fractional)")
         self.ax.set_ylabel("TSYS")
         self.ax.set_title(f"TSYS {self.block.station}")
+        if valid_x_mask.any() and y_values:
+            xs_valid = self.xs[valid_x_mask]
+            y_concat = np.concatenate(y_values)
+            x_min = float(np.min(xs_valid))
+            x_max = float(np.max(xs_valid))
+            y_min = float(np.min(y_concat))
+            y_max = float(np.max(y_concat))
+            x_pad = (x_max - x_min) * 0.02 if x_max > x_min else 0.5
+            y_pad = (y_max - y_min) * 0.05 if y_max > y_min else 1.0
+            self.ax.set_xlim(x_min - x_pad, x_max + x_pad)
+            self.ax.set_ylim(y_min - y_pad, y_max + y_pad)
         self.ax.legend(loc="upper right", fontsize="small", ncol=2)
 
         self.selected_scatter = self.ax.scatter([], [], s=60, facecolors="none", edgecolors="red", linewidths=1.2)

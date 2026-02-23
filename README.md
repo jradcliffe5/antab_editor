@@ -4,9 +4,8 @@ Small set of tools for interactively editing ANTAB TSYS tables.
 
 ## Tools
 
-- `antab_edit.py`: CLI editor (inspect/set values by index or column).
-- `antab_plot_edit.py`: Simple interactive plot editor (single index at a time).
-- `antab_gui_edit.py`: Full GUI with multi-plot, table view, selection tools, smoothing, and expected TSYS fill.
+- `antab_editor.py`: Main GUI editor (multi-plot, table view, selection tools, smoothing, expected TSYS fill).
+- `antab_io.py`: Shared parsing/writing helpers used by the GUI.
 
 ## Requirements
 
@@ -33,7 +32,7 @@ Small set of tools for interactively editing ANTAB TSYS tables.
 ## Usage
 
 ```bash
-./antab_gui_edit.py ek053a.antab
+./antab_editor.py ek053a.antab
 ```
 
 ## Notes

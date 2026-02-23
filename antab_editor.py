@@ -26,7 +26,7 @@ except Exception as exc:
 
 import numpy as np
 
-from antab_edit import parse_antab, write_antab, TsysSegment, TsysBlock, DataRow
+from antab_io import parse_antab, write_antab, TsysSegment, TsysBlock, DataRow
 
 MISSING_VALUE = -99.0
 SEFD_PATH = os.path.join(os.getcwd(), "sefd_values.txt")

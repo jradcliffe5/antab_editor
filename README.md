@@ -1,11 +1,12 @@
-# ANTAB Editor (Local)
+# ANTAB Editor
 
-Small set of tools for interactively editing ANTAB TSYS tables.
+This project is a small local toolkit for working with ANTAB TSYS tables.  
+It gives you a GUI for interactive cleanup and editing, plus shared parsing/writing helpers.
 
-## Tools
+## What’s Included
 
-- `antab_editor.py`: Main GUI editor (multi-plot, table view, selection tools, smoothing, expected TSYS fill).
-- `antab_io.py`: Shared parsing/writing helpers used by the GUI.
+- `antab_editor.py`: Main GUI editor. Includes plotting, table editing, selection tools, smoothing, and expected TSYS fill.
+- `antab_io.py`: Shared ANTAB parsing and writing helpers used by the GUI.
 
 ## Requirements
 
@@ -14,22 +15,24 @@ Small set of tools for interactively editing ANTAB TSYS tables.
 - `matplotlib`
 - `tkinter` (usually bundled with Python on macOS)
 
-## Files
+## Project Files
 
 - `ek053a.antab`: Example ANTAB file.
 - `sefd_values.txt`: SEFD lookup table used for expected TSYS calculation.
 
-## GUI Highlights
+## GUI Features
 
-- Multi-index plotting and selection (rectangle or clicks)
-- Table view synced with plot selection
-- Replace/blank values (`-99.0` indicates missing and is not plotted)
-- Smoothing preview (Mean/Median/Gaussian) with configurable time window
-- Apply smoothing to data
-- Apply expected TSYS from SEFD + DPFU
-- Save to original file or to a new file
+- Plot one or more TSYS indices and select points by click or drag.
+- Keep the table view synced with plot selection.
+- Replace or blank values (`-99.0` is treated as missing and not plotted).
+- Interpolate blanked values between valid neighbors.
+- Edit station `GAIN` fields (`DPFU`, `FREQ`, `POLY`).
+- Preview smoothing (Mean, Median, Gaussian) with a configurable time window.
+- Apply smoothing directly to data.
+- Apply expected TSYS/SEFD across the current block (and set station `DPFU` to `1`).
+- Save changes in place or write to a new file.
 
-## Usage
+## Quick Start
 
 ```bash
 ./antab_editor.py ek053a.antab
@@ -37,5 +40,5 @@ Small set of tools for interactively editing ANTAB TSYS tables.
 
 ## Notes
 
-- Missing values should be set to `-99.0` (these are excluded from plots and smoothing).
-- Expected TSYS uses `sefd_values.txt` and the `GAIN` section (`DPFU` and `FREQ`) from the ANTAB file.
+- Use `-99.0` for missing values. Missing values are excluded from plotting and smoothing.
+- Expected TSYS/SEFD uses `sefd_values.txt` and the station `GAIN` `FREQ`, then rewrites that station’s `DPFU` to `1`.

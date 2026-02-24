@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 import argparse
+import copy
 import math
 import os
 import sys
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
     import tkinter as tk
@@ -26,7 +27,7 @@ except Exception as exc:
 
 import numpy as np
 
-from antab_io import parse_antab, write_antab, TsysSegment, TsysBlock, DataRow
+from antab_io import parse_antab, write_antab, RawSegment, TsysSegment, TsysBlock, DataRow
 
 MISSING_VALUE = -99.0
 SEFD_PATH = os.path.join(os.getcwd(), "sefd_values.txt")
@@ -54,6 +55,11 @@ def _parse_float_list(text: str) -> List[float]:
         except ValueError:
             continue
     return values
+
+
+def _format_float_list(values: List[float]) -> str:
+    return ", ".join(f"{v:g}" for v in values)
+
 
 def _band_cm_to_hz(cm: float) -> float:
     c = 299792458.0
@@ -92,11 +98,16 @@ class AntabGui:
         self.smooth_method_var = tk.StringVar(value="Mean")
         self.save_write_new = tk.BooleanVar(value=False)
         self.save_out_var = tk.StringVar(value="")
+        self.gain_dpfu_var = tk.StringVar(value="")
+        self.gain_freq_var = tk.StringVar(value="")
+        self.gain_poly_var = tk.StringVar(value="")
         self.table = None
         self.row_iids: List[str] = []
         self.iid_to_row: Dict[str, int] = {}
         self.table_selection_guard = False
         self.table_guard_job = None
+        self.undo_snapshot: Optional[Dict[str, Any]] = None
+        self.undo_button = None
 
         self._build_ui()
         self._load_block(0)
@@ -115,6 +126,7 @@ class AntabGui:
                 station = parts[1].upper() if len(parts) > 1 else ""
                 dpfu_vals: List[float] = []
                 freq_vals: List[float] = []
+                poly_vals: List[float] = []
                 i += 1
                 while i < len(lines) and lines[i].strip() != "/":
                     l = lines[i].strip()
@@ -122,9 +134,11 @@ class AntabGui:
                         dpfu_vals = _parse_float_list(l)
                     elif l.startswith("FREQ"):
                         freq_vals = _parse_float_list(l)
+                    elif l.startswith("POLY"):
+                        poly_vals = _parse_float_list(l)
                     i += 1
                 if station:
-                    gain_info[station] = {"dpfu": dpfu_vals, "freq": freq_vals}
+                    gain_info[station] = {"dpfu": dpfu_vals, "freq": freq_vals, "poly": poly_vals}
             else:
                 i += 1
         return gain_info
@@ -249,7 +263,21 @@ class AntabGui:
         self.value_entry.pack(fill=tk.X, padx=6)
         ttk.Button(edit_frame, text="Apply to Selection", command=self._apply_value).pack(fill=tk.X, padx=6, pady=(6, 2))
         ttk.Button(edit_frame, text="Blank Selection", command=self._blank_value).pack(fill=tk.X, padx=6, pady=(0, 6))
+        ttk.Button(edit_frame, text="Interpolate Blanks", command=self._interpolate_blanks).pack(fill=tk.X, padx=6, pady=(0, 6))
         ttk.Button(edit_frame, text="Apply Expected TSYS/SEFD", command=self._apply_expected).pack(fill=tk.X, padx=6, pady=(0, 6))
+
+        gain_frame = ttk.LabelFrame(self.left, text="GAIN Values")
+        gain_frame.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(gain_frame, text="DPFU").pack(anchor=tk.W, padx=6, pady=(6, 2))
+        self.gain_dpfu_entry = ttk.Entry(gain_frame, textvariable=self.gain_dpfu_var)
+        self.gain_dpfu_entry.pack(fill=tk.X, padx=6)
+        ttk.Label(gain_frame, text="FREQ (MHz)").pack(anchor=tk.W, padx=6, pady=(6, 2))
+        self.gain_freq_entry = ttk.Entry(gain_frame, textvariable=self.gain_freq_var)
+        self.gain_freq_entry.pack(fill=tk.X, padx=6)
+        ttk.Label(gain_frame, text="POLY").pack(anchor=tk.W, padx=6, pady=(6, 2))
+        self.gain_poly_entry = ttk.Entry(gain_frame, textvariable=self.gain_poly_var)
+        self.gain_poly_entry.pack(fill=tk.X, padx=6)
+        ttk.Button(gain_frame, text="Apply GAIN Values", command=self._apply_gain_values).pack(fill=tk.X, padx=6, pady=(6, 6))
 
         smooth_frame = ttk.LabelFrame(self.left, text="Smoothing")
         smooth_frame.pack(fill=tk.X, pady=(8, 0))
@@ -273,6 +301,9 @@ class AntabGui:
 
         save_frame = ttk.LabelFrame(self.left, text="Save")
         save_frame.pack(fill=tk.X, pady=(8, 0))
+        self.undo_button = ttk.Button(save_frame, text="Undo Last Change", command=self._undo_last_change)
+        self.undo_button.pack(fill=tk.X, pady=(0, 6))
+        self._update_undo_button_state()
         ttk.Button(save_frame, text="Save", command=self._save).pack(fill=tk.X)
         ttk.Checkbutton(save_frame, text="Save to new file", variable=self.save_write_new,
                         command=self._toggle_save_output).pack(anchor=tk.W, padx=6, pady=(6, 0))
@@ -314,8 +345,56 @@ class AntabGui:
         table_scroll_x.pack(side=tk.BOTTOM, fill=tk.X)
         self.table.configure(xscrollcommand=table_scroll_x.set)
 
+        self.root.bind_all("<Control-z>", self._undo_last_change)
+        self.root.bind_all("<Command-z>", self._undo_last_change)
+
     def _set_status(self, text: str) -> None:
         self.status_var.set(text)
+
+    def _make_undo_snapshot(self) -> Dict[str, Any]:
+        return {
+            "segments": copy.deepcopy(self.segments),
+            "gain_info": copy.deepcopy(self.gain_info),
+            "block_index": self.block_index,
+        }
+
+    def _save_undo_snapshot(self, snapshot: Dict[str, Any], label: str) -> None:
+        snapshot["label"] = label
+        self.undo_snapshot = snapshot
+        self._update_undo_button_state()
+
+    def _update_undo_button_state(self) -> None:
+        if self.undo_button is None:
+            return
+        state = "normal" if self.undo_snapshot is not None else "disabled"
+        self.undo_button.configure(state=state)
+
+    def _undo_last_change(self, event=None):
+        if self.undo_snapshot is None:
+            self._set_status("Nothing to undo.")
+            return "break"
+
+        snapshot = self.undo_snapshot
+        self.undo_snapshot = None
+        self._update_undo_button_state()
+
+        self.segments = snapshot["segments"]
+        self.gain_info = snapshot["gain_info"]
+        self.blocks = [seg.block for seg in self.segments if isinstance(seg, TsysSegment)]
+        if not self.blocks:
+            self._set_status("Undo failed: no TSYS blocks in restored state.")
+            return "break"
+
+        target_index = int(snapshot.get("block_index", 0))
+        target_index = max(0, min(target_index, len(self.blocks) - 1))
+        block_names = [f"{i}: {b.station}" for i, b in enumerate(self.blocks)]
+        self.block_combo.configure(values=block_names)
+        self.block_combo.current(target_index)
+        self._load_block(target_index)
+
+        label = str(snapshot.get("label", "last change"))
+        self._set_status(f"Undid {label}.")
+        return "break"
 
     def _set_table_guard(self) -> None:
         self.table_selection_guard = True
@@ -350,6 +429,7 @@ class AntabGui:
 
         self._setup_table()
         self._populate_table()
+        self._load_gain_fields()
         self._update_plot()
         self._set_status(f"Loaded TSYS {self.block.station}")
         self._toggle_save_output()
@@ -458,6 +538,87 @@ class AntabGui:
             return "gaussian"
         return "mean"
 
+    def _parse_list_entry(self, raw: str, field_name: str) -> Tuple[bool, Optional[List[float]]]:
+        text = raw.strip()
+        if text == "":
+            return True, None
+        values: List[float] = []
+        for token in text.replace(",", " ").split():
+            try:
+                values.append(float(token))
+            except ValueError:
+                self._set_status(f"Invalid {field_name} value: {token}")
+                return False, None
+        if not values:
+            self._set_status(f"No {field_name} values provided.")
+            return False, None
+        return True, values
+
+    def _load_gain_fields(self) -> None:
+        station = self.block.station.upper()
+        info = self.gain_info.get(station, {})
+        self.gain_dpfu_var.set(_format_float_list(info.get("dpfu", [])))
+        self.gain_freq_var.set(_format_float_list(info.get("freq", [])))
+        self.gain_poly_var.set(_format_float_list(info.get("poly", [])))
+
+    def _set_gain_line(self, lines: List[str], start: int, end: int, key: str, values: List[float]) -> Tuple[int, bool]:
+        text = _format_float_list(values)
+        for idx in range(start, end):
+            raw = lines[idx]
+            if raw.strip().startswith(key):
+                indent = raw[:len(raw) - len(raw.lstrip())]
+                new_line = f"{indent}{key} = {text}"
+                if lines[idx] != new_line:
+                    lines[idx] = new_line
+                    return end, True
+                return end, False
+        lines.insert(end, f"{key} = {text}")
+        return end + 1, True
+
+    def _set_station_gain_values(
+        self,
+        station: str,
+        dpfu_vals: Optional[List[float]] = None,
+        freq_vals: Optional[List[float]] = None,
+        poly_vals: Optional[List[float]] = None,
+    ) -> Tuple[bool, bool]:
+        station = station.upper()
+        found = False
+        changed = False
+        for seg in self.segments:
+            if not isinstance(seg, RawSegment):
+                continue
+            lines = seg.lines
+            i = 0
+            while i < len(lines):
+                parts = lines[i].strip().split()
+                if len(parts) >= 2 and parts[0] == "GAIN" and parts[1].upper() == station:
+                    found = True
+                    end = i + 1
+                    while end < len(lines) and lines[end].strip() != "/":
+                        end += 1
+                    if dpfu_vals is not None:
+                        end, did = self._set_gain_line(lines, i + 1, end, "DPFU", dpfu_vals)
+                        changed = changed or did
+                    if freq_vals is not None:
+                        end, did = self._set_gain_line(lines, i + 1, end, "FREQ", freq_vals)
+                        changed = changed or did
+                    if poly_vals is not None:
+                        end, did = self._set_gain_line(lines, i + 1, end, "POLY", poly_vals)
+                        changed = changed or did
+                    i = end
+                i += 1
+        if not found:
+            return False, False
+        info = self.gain_info.setdefault(station, {"dpfu": [], "freq": [], "poly": []})
+        if dpfu_vals is not None:
+            info["dpfu"] = dpfu_vals
+        if freq_vals is not None:
+            info["freq"] = freq_vals
+        if poly_vals is not None:
+            info["poly"] = poly_vals
+        return True, changed
+
     def _smooth_series(self, index_name: str, window_days: float, method: str) -> np.ndarray:
         y = self._build_series(index_name)
         if window_days is None or window_days <= 0:
@@ -537,15 +698,53 @@ class AntabGui:
                 dpfu = dpfu_vals[0]
         return dpfu * sefd_jy
 
-    def _apply_expected(self) -> None:
-        indices = self._selected_indices()
-        if not indices:
-            self._set_status("Select indices to apply expected TSYS.")
+    def _set_station_dpfu_to_one(self, station: str) -> bool:
+        station = station.upper()
+        dpfu_count = max(1, len(self.gain_info.get(station, {}).get("dpfu", [])))
+        _, changed = self._set_station_gain_values(station, dpfu_vals=[1.0] * dpfu_count)
+        self._load_gain_fields()
+        return changed
+
+    def _apply_gain_values(self) -> None:
+        station = self.block.station.upper()
+        ok, dpfu_vals = self._parse_list_entry(self.gain_dpfu_var.get(), "DPFU")
+        if not ok:
             return
-        rows_mask = self._selected_row_mask(indices)
-        if not rows_mask.any():
-            rows_mask = np.ones(len(self.rows), dtype=bool)
-        rows_idx = np.where(rows_mask)[0]
+        ok, freq_vals = self._parse_list_entry(self.gain_freq_var.get(), "FREQ")
+        if not ok:
+            return
+        ok, poly_vals = self._parse_list_entry(self.gain_poly_var.get(), "POLY")
+        if not ok:
+            return
+        if dpfu_vals is None and freq_vals is None and poly_vals is None:
+            self._set_status("Enter at least one GAIN field to apply.")
+            return
+        snapshot = self._make_undo_snapshot()
+        found, changed = self._set_station_gain_values(
+            station,
+            dpfu_vals=dpfu_vals,
+            freq_vals=freq_vals,
+            poly_vals=poly_vals,
+        )
+        if not found:
+            self._set_status(f"No GAIN block found for station {station}.")
+            return
+        self._load_gain_fields()
+        if changed:
+            self._save_undo_snapshot(snapshot, "GAIN edit")
+            self._set_status(f"Updated GAIN values for {station}.")
+        else:
+            self._set_status(f"GAIN values for {station} already match.")
+
+    def _apply_expected(self) -> None:
+        indices = list(self.block.index)
+        if not indices or not self.rows:
+            self._set_status("No TSYS data available for this block.")
+            return
+        station = self.block.station.upper()
+        snapshot = self._make_undo_snapshot()
+        dpfu_changed = self._set_station_dpfu_to_one(station)
+        rows_idx = np.arange(len(self.rows), dtype=int)
         rows_touched = set()
         applied_indices = 0
         for index_name in indices:
@@ -562,11 +761,14 @@ class AntabGui:
                 self.series_cache[index_name][rows_idx] = expected
             applied_indices += 1
         if applied_indices == 0:
+            if dpfu_changed:
+                self._save_undo_snapshot(snapshot, "expected TSYS/SEFD apply")
             self._set_status("No expected TSYS available (missing GAIN/SEFD data).")
             return
+        self._save_undo_snapshot(snapshot, "expected TSYS/SEFD apply")
         self._refresh_table_rows(rows_touched)
         self._update_plot()
-        self._set_status(f"Applied expected TSYS to {applied_indices} indices.")
+        self._set_status(f"Replaced all values with expected TSYS/SEFD for {applied_indices} indices; set GAIN {station} DPFU to 1.")
 
     def _setup_table(self) -> None:
         if self.table is None:
@@ -839,6 +1041,7 @@ class AntabGui:
         if numeric_ok and numeric_value == MISSING_VALUE:
             numeric_ok = False
             numeric_value = math.nan
+        snapshot = self._make_undo_snapshot()
         rows_touched = set()
         for index_name, mask in self.selected_masks.items():
             if not mask.any():
@@ -852,6 +1055,7 @@ class AntabGui:
                 rows_touched.add(int(row_idx))
             if index_name in self.series_cache:
                 self.series_cache[index_name][rows_idx] = numeric_value if numeric_ok else math.nan
+        self._save_undo_snapshot(snapshot, "value apply")
         self._refresh_table_rows(rows_touched)
         self._update_plot()
         self._set_status(f"Applied value to {total} points.")
@@ -862,6 +1066,7 @@ class AntabGui:
             self._set_status("No points selected.")
             return
         blank_value = f"{MISSING_VALUE:.1f}"
+        snapshot = self._make_undo_snapshot()
         rows_touched = set()
         for index_name, mask in self.selected_masks.items():
             if not mask.any():
@@ -875,9 +1080,82 @@ class AntabGui:
                 rows_touched.add(int(row_idx))
             if index_name in self.series_cache:
                 self.series_cache[index_name][rows_idx] = math.nan
+        self._save_undo_snapshot(snapshot, "blank value")
         self._refresh_table_rows(rows_touched)
         self._update_plot()
         self._set_status(f"Blanked {total} points.")
+
+    def _interpolate_missing_between(self, ys: np.ndarray) -> np.ndarray:
+        out = ys.copy()
+        finite = np.isfinite(ys)
+        if np.count_nonzero(finite) < 2:
+            return out
+        x_valid = self.xs[finite]
+        y_valid = ys[finite]
+        order = np.argsort(x_valid)
+        x_valid = x_valid[order]
+        y_valid = y_valid[order]
+        fill_mask = (~finite) & (self.xs >= x_valid[0]) & (self.xs <= x_valid[-1])
+        if not fill_mask.any():
+            return out
+        out[fill_mask] = np.interp(self.xs[fill_mask], x_valid, y_valid)
+        return out
+
+    def _missing_entry_mask(self, idx: int) -> np.ndarray:
+        mask = np.zeros(len(self.rows), dtype=bool)
+        for row_idx, row in enumerate(self.rows):
+            if idx >= len(row.values):
+                mask[row_idx] = True
+                continue
+            raw = row.values[idx].strip()
+            if raw == "":
+                mask[row_idx] = True
+                continue
+            try:
+                mask[row_idx] = float(raw) == MISSING_VALUE
+            except ValueError:
+                mask[row_idx] = False
+        return mask
+
+    def _interpolate_blanks(self) -> None:
+        indices = self._selected_indices()
+        if not indices:
+            self._set_status("Select indices to interpolate.")
+            return
+        rows_mask = self._selected_row_mask(indices)
+        if not rows_mask.any():
+            rows_mask = np.ones(len(self.rows), dtype=bool)
+
+        rows_touched = set()
+        total_filled = 0
+        snapshot = None
+        for index_name in indices:
+            idx = self.block.index.index(index_name)
+            ys = self._build_series(index_name)
+            interp = self._interpolate_missing_between(ys)
+            missing_mask = self._missing_entry_mask(idx)
+            fill_mask = rows_mask & missing_mask & np.isfinite(interp)
+            if not fill_mask.any():
+                continue
+            rows_idx = np.where(fill_mask)[0]
+            if snapshot is None:
+                snapshot = self._make_undo_snapshot()
+            for row_idx in rows_idx:
+                row = self.rows[int(row_idx)]
+                self._ensure_value_length(row, idx)
+                row.values[idx] = f"{interp[row_idx]:.1f}"
+                rows_touched.add(int(row_idx))
+            if index_name in self.series_cache:
+                self.series_cache[index_name][rows_idx] = interp[rows_idx]
+            total_filled += int(rows_idx.size)
+
+        if total_filled == 0:
+            self._set_status("No blank points found between valid neighbors.")
+            return
+        self._save_undo_snapshot(snapshot, "blank interpolation")
+        self._refresh_table_rows(rows_touched)
+        self._update_plot()
+        self._set_status(f"Interpolated {total_filled} blank points.")
 
     def _apply_smoothing(self) -> None:
         window_days = self._smooth_window_days()
@@ -890,6 +1168,7 @@ class AntabGui:
             return
         method = self._smooth_method_key()
         rows_touched = set()
+        snapshot = None
         for index_name in indices:
             smooth = self._smooth_series(index_name, window_days, method)
             orig = self._build_series(index_name)
@@ -897,6 +1176,8 @@ class AntabGui:
             if not mask.any():
                 continue
             idx = self.block.index.index(index_name)
+            if snapshot is None:
+                snapshot = self._make_undo_snapshot()
             for row_idx in np.where(mask)[0]:
                 row = self.rows[row_idx]
                 self._ensure_value_length(row, idx)
@@ -904,6 +1185,7 @@ class AntabGui:
                 rows_touched.add(int(row_idx))
             self.series_cache[index_name] = smooth.copy()
         if rows_touched:
+            self._save_undo_snapshot(snapshot, f"smoothing ({method})")
             self._refresh_table_rows(rows_touched)
             self._update_plot()
             self._set_status(f"Applied smoothing ({method}) to {len(indices)} indices.")

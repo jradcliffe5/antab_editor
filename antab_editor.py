@@ -30,7 +30,7 @@ import numpy as np
 from antab_io import parse_antab, write_antab, RawSegment, TsysSegment, TsysBlock, DataRow
 
 MISSING_VALUE = -99.0
-SEFD_PATH = os.path.join(os.getcwd(), "sefd_values.txt")
+SEFD_FILENAME = "sefd_values.txt"
 
 
 def first_antab_in_cwd() -> Optional[str]:
@@ -65,6 +65,14 @@ def _band_cm_to_hz(cm: float) -> float:
     c = 299792458.0
     wavelength_m = cm / 100.0
     return c / wavelength_m
+
+
+def _normalize_station_key(station: str) -> str:
+    text = station.strip()
+    if text == "":
+        return ""
+    token = text.split()[0].strip(",;")
+    return token.upper()
 
 
 class AntabGui:
@@ -121,20 +129,21 @@ class AntabGui:
         i = 0
         while i < len(lines):
             line = lines[i].strip()
-            if line.startswith("GAIN"):
-                parts = line.split()
-                station = parts[1].upper() if len(parts) > 1 else ""
+            parts = line.split()
+            if parts and parts[0].upper() == "GAIN":
+                station = _normalize_station_key(parts[1]) if len(parts) > 1 else ""
                 dpfu_vals: List[float] = []
                 freq_vals: List[float] = []
                 poly_vals: List[float] = []
                 i += 1
                 while i < len(lines) and lines[i].strip() != "/":
                     l = lines[i].strip()
-                    if l.startswith("DPFU"):
+                    key = l.split("=", 1)[0].strip().upper() if l else ""
+                    if key == "DPFU":
                         dpfu_vals = _parse_float_list(l)
-                    elif l.startswith("FREQ"):
+                    elif key == "FREQ":
                         freq_vals = _parse_float_list(l)
-                    elif l.startswith("POLY"):
+                    elif key == "POLY":
                         poly_vals = _parse_float_list(l)
                     i += 1
                 if station:
@@ -145,9 +154,17 @@ class AntabGui:
 
     def _load_sefd_table(self) -> Dict[str, Dict[float, float]]:
         sefd_table: Dict[str, Dict[float, float]] = {}
-        if not os.path.exists(SEFD_PATH):
+        antab_dir = os.path.dirname(os.path.abspath(self.path))
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        candidates = [
+            os.path.join(antab_dir, SEFD_FILENAME),
+            os.path.join(script_dir, SEFD_FILENAME),
+            os.path.join(os.getcwd(), SEFD_FILENAME),
+        ]
+        sefd_path = next((p for p in candidates if os.path.exists(p)), candidates[0])
+        if not os.path.exists(sefd_path):
             return sefd_table
-        with open(SEFD_PATH, "r", encoding="utf-8") as f:
+        with open(sefd_path, "r", encoding="utf-8") as f:
             lines = [l.rstrip("\n") for l in f if l.strip() != ""]
         if not lines:
             return sefd_table
@@ -166,7 +183,7 @@ class AntabGui:
             station = parts[0]
             if station == "":
                 continue
-            station_key = station.lower()
+            station_key = _normalize_station_key(station)
             sefd_table.setdefault(station_key, {})
             for hz, cell in zip(band_hz, parts[1:]):
                 if hz is None:
@@ -264,7 +281,8 @@ class AntabGui:
         ttk.Button(edit_frame, text="Apply to Selection", command=self._apply_value).pack(fill=tk.X, padx=6, pady=(6, 2))
         ttk.Button(edit_frame, text="Blank Selection", command=self._blank_value).pack(fill=tk.X, padx=6, pady=(0, 6))
         ttk.Button(edit_frame, text="Interpolate Blanks", command=self._interpolate_blanks).pack(fill=tk.X, padx=6, pady=(0, 6))
-        ttk.Button(edit_frame, text="Apply Expected TSYS/SEFD", command=self._apply_expected).pack(fill=tk.X, padx=6, pady=(0, 6))
+        ttk.Button(edit_frame, text="Apply Expected TSYS (Whole Antenna)", command=self._apply_expected).pack(fill=tk.X, padx=6, pady=(0, 6))
+        ttk.Button(edit_frame, text="Apply Expected*DPFU to Selection", command=self._apply_expected_selection).pack(fill=tk.X, padx=6, pady=(0, 6))
 
         gain_frame = ttk.LabelFrame(self.left, text="GAIN Values")
         gain_frame.pack(fill=tk.X, pady=(8, 0))
@@ -555,7 +573,7 @@ class AntabGui:
         return True, values
 
     def _load_gain_fields(self) -> None:
-        station = self.block.station.upper()
+        station = _normalize_station_key(self.block.station)
         info = self.gain_info.get(station, {})
         self.gain_dpfu_var.set(_format_float_list(info.get("dpfu", [])))
         self.gain_freq_var.set(_format_float_list(info.get("freq", [])))
@@ -565,7 +583,8 @@ class AntabGui:
         text = _format_float_list(values)
         for idx in range(start, end):
             raw = lines[idx]
-            if raw.strip().startswith(key):
+            head = raw.strip().split("=", 1)[0].strip().upper() if raw.strip() else ""
+            if head == key:
                 indent = raw[:len(raw) - len(raw.lstrip())]
                 new_line = f"{indent}{key} = {text}"
                 if lines[idx] != new_line:
@@ -582,7 +601,7 @@ class AntabGui:
         freq_vals: Optional[List[float]] = None,
         poly_vals: Optional[List[float]] = None,
     ) -> Tuple[bool, bool]:
-        station = station.upper()
+        station = _normalize_station_key(station)
         found = False
         changed = False
         for seg in self.segments:
@@ -592,7 +611,7 @@ class AntabGui:
             i = 0
             while i < len(lines):
                 parts = lines[i].strip().split()
-                if len(parts) >= 2 and parts[0] == "GAIN" and parts[1].upper() == station:
+                if len(parts) >= 2 and parts[0].upper() == "GAIN" and _normalize_station_key(parts[1]) == station:
                     found = True
                     end = i + 1
                     while end < len(lines) and lines[end].strip() != "/":
@@ -667,9 +686,23 @@ class AntabGui:
         smoothed[mask] = smoothed_valid
         return smoothed
 
-    def _expected_tsys_for_index(self, index_name: str) -> Optional[float]:
-        station = self.block.station.upper()
-        gain = self.gain_info.get(station)
+    def _dpfu_for_index(self, dpfu_vals: List[float], index_name: str) -> Optional[float]:
+        if not dpfu_vals:
+            return None
+        if len(dpfu_vals) == 1:
+            return dpfu_vals[0]
+        upper = index_name.upper()
+        is_r = "R" in upper
+        is_l = "L" in upper
+        if is_r and not is_l:
+            return dpfu_vals[0]
+        if is_l and not is_r:
+            return dpfu_vals[1] if len(dpfu_vals) > 1 else dpfu_vals[0]
+        return dpfu_vals[0]
+
+    def _expected_tsys_for_index(self, index_name: str, include_dpfu: bool = True) -> Optional[float]:
+        station_key = _normalize_station_key(self.block.station)
+        gain = self.gain_info.get(station_key)
         if not gain:
             return None
         dpfu_vals = gain.get("dpfu", [])
@@ -678,35 +711,27 @@ class AntabGui:
             return None
         freq_mhz = sum(freq_vals) / len(freq_vals)
         freq_hz = freq_mhz * 1e6
-        sefd_map = self.sefd_table.get(station.lower())
+        sefd_map = self.sefd_table.get(station_key)
         if not sefd_map:
             return None
         nearest = min(sefd_map.keys(), key=lambda f: abs(f - freq_hz))
         sefd_jy = sefd_map[nearest]
-        if not dpfu_vals:
+        if not include_dpfu:
+            return sefd_jy
+        dpfu = self._dpfu_for_index(dpfu_vals, index_name)
+        if dpfu is None:
             return None
-        if len(dpfu_vals) == 1:
-            dpfu = dpfu_vals[0]
-        else:
-            is_r = "R" in index_name
-            is_l = "L" in index_name
-            if is_r and not is_l:
-                dpfu = dpfu_vals[0]
-            elif is_l and not is_r:
-                dpfu = dpfu_vals[1] if len(dpfu_vals) > 1 else dpfu_vals[0]
-            else:
-                dpfu = dpfu_vals[0]
         return dpfu * sefd_jy
 
     def _set_station_dpfu_to_one(self, station: str) -> bool:
-        station = station.upper()
+        station = _normalize_station_key(station)
         dpfu_count = max(1, len(self.gain_info.get(station, {}).get("dpfu", [])))
         _, changed = self._set_station_gain_values(station, dpfu_vals=[1.0] * dpfu_count)
         self._load_gain_fields()
         return changed
 
     def _apply_gain_values(self) -> None:
-        station = self.block.station.upper()
+        station = _normalize_station_key(self.block.station)
         ok, dpfu_vals = self._parse_list_entry(self.gain_dpfu_var.get(), "DPFU")
         if not ok:
             return
@@ -741,7 +766,7 @@ class AntabGui:
         if not indices or not self.rows:
             self._set_status("No TSYS data available for this block.")
             return
-        station = self.block.station.upper()
+        station = _normalize_station_key(self.block.station)
         snapshot = self._make_undo_snapshot()
         dpfu_changed = self._set_station_dpfu_to_one(station)
         rows_idx = np.arange(len(self.rows), dtype=int)
@@ -762,13 +787,58 @@ class AntabGui:
             applied_indices += 1
         if applied_indices == 0:
             if dpfu_changed:
-                self._save_undo_snapshot(snapshot, "expected TSYS/SEFD apply")
+                self._save_undo_snapshot(snapshot, "expected TSYS apply (whole antenna)")
             self._set_status("No expected TSYS available (missing GAIN/SEFD data).")
             return
-        self._save_undo_snapshot(snapshot, "expected TSYS/SEFD apply")
+        self._save_undo_snapshot(snapshot, "expected TSYS apply (whole antenna)")
         self._refresh_table_rows(rows_touched)
         self._update_plot()
-        self._set_status(f"Replaced all values with expected TSYS/SEFD for {applied_indices} indices; set GAIN {station} DPFU to 1.")
+        self._set_status(f"Replaced all values with expected TSYS for {applied_indices} indices; set GAIN {station} DPFU to 1.")
+
+    def _apply_expected_selection(self) -> None:
+        total_selected = int(sum(mask.sum() for mask in self.selected_masks.values()))
+        if total_selected == 0:
+            self._set_status("No points selected.")
+            return
+
+        snapshot = None
+        rows_touched = set()
+        total_applied = 0
+        applied_indices = 0
+        for index_name, mask in self.selected_masks.items():
+            if not mask.any():
+                continue
+
+            # expected(TSYS) * DPFU, using R/L assignment from index name.
+            expected = self._expected_tsys_for_index(index_name, include_dpfu=True)
+            if expected is None:
+                continue
+
+            rows_idx = np.where(mask)[0]
+            if rows_idx.size == 0:
+                continue
+            if snapshot is None:
+                snapshot = self._make_undo_snapshot()
+
+            idx = self.block.index.index(index_name)
+            for row_idx in rows_idx:
+                row = self.rows[int(row_idx)]
+                self._ensure_value_length(row, idx)
+                row.values[idx] = f"{expected:.1f}"
+                rows_touched.add(int(row_idx))
+            if index_name in self.series_cache:
+                self.series_cache[index_name][rows_idx] = expected
+            total_applied += int(rows_idx.size)
+            applied_indices += 1
+
+        if total_applied == 0:
+            self._set_status("No expected TSYS*DPFU available for selected points (missing GAIN/SEFD data).")
+            return
+
+        self._save_undo_snapshot(snapshot, "expected TSYS*DPFU apply (selection)")
+        self._refresh_table_rows(rows_touched)
+        self._update_plot()
+        self._set_status(f"Applied expected TSYS*DPFU to {total_applied} selected points across {applied_indices} indices.")
 
     def _setup_table(self) -> None:
         if self.table is None:

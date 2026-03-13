@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 try:
     import tkinter as tk
-    from tkinter import ttk
+    from tkinter import ttk, filedialog
 except Exception as exc:
     print("tkinter is required for this tool.")
     print(f"Import error: {exc}")
@@ -75,6 +75,62 @@ def _normalize_station_key(station: str) -> str:
     return token.upper()
 
 
+def _load_sefd_table_from_dirs(
+    search_dirs: List[Optional[str]],
+) -> Tuple[Dict[str, Dict[float, float]], List[Tuple[float, float]]]:
+    """Load sefd_values.txt from the first directory that contains it.
+
+    Returns (sefd_table, sefd_bands).
+    """
+    sefd_table: Dict[str, Dict[float, float]] = {}
+    sefd_bands: List[Tuple[float, float]] = []
+
+    candidates = [
+        os.path.join(d, SEFD_FILENAME) for d in search_dirs if d is not None
+    ]
+    sefd_path = next((p for p in candidates if os.path.exists(p)), None)
+    if sefd_path is None:
+        return sefd_table, sefd_bands
+
+    with open(sefd_path, "r", encoding="utf-8") as f:
+        lines = [l.rstrip("\n") for l in f if l.strip() != ""]
+    if not lines:
+        return sefd_table, sefd_bands
+
+    header = [v.strip() for v in lines[0].split("|")[1:]]
+    band_cm: List[Optional[float]] = []
+    for h in header:
+        try:
+            band_cm.append(float(h))
+        except ValueError:
+            band_cm.append(None)
+    band_hz: List[Optional[float]] = [
+        (_band_cm_to_hz(cm) if cm is not None else None) for cm in band_cm
+    ]
+    sefd_bands = [
+        (cm, hz)
+        for cm, hz in zip(band_cm, band_hz)
+        if cm is not None and hz is not None
+    ]
+    for line in lines[1:]:
+        parts = [v.strip() for v in line.split("|")]
+        if not parts:
+            continue
+        station = parts[0]
+        if station == "":
+            continue
+        station_key = _normalize_station_key(station)
+        sefd_table.setdefault(station_key, {})
+        for hz, cell in zip(band_hz, parts[1:]):
+            if hz is None or cell == "":
+                continue
+            try:
+                sefd_table[station_key][hz] = float(cell)
+            except ValueError:
+                continue
+    return sefd_table, sefd_bands
+
+
 class AntabGui:
     def __init__(self, root: tk.Tk, path: str, segments) -> None:
         self.root = root
@@ -96,6 +152,7 @@ class AntabGui:
         self.table_sync_skipped = False
         self.table_sync_rows = 0
         self.gain_info = self._parse_gain_info(path)
+        self.sefd_bands: List[Tuple[float, float]] = []
         self.sefd_table = self._load_sefd_table()
 
         self.series_artists: Dict[str, Tuple] = {}
@@ -153,47 +210,13 @@ class AntabGui:
         return gain_info
 
     def _load_sefd_table(self) -> Dict[str, Dict[float, float]]:
-        sefd_table: Dict[str, Dict[float, float]] = {}
-        antab_dir = os.path.dirname(os.path.abspath(self.path))
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        candidates = [
-            os.path.join(antab_dir, SEFD_FILENAME),
-            os.path.join(script_dir, SEFD_FILENAME),
-            os.path.join(os.getcwd(), SEFD_FILENAME),
+        search_dirs = [
+            os.path.dirname(os.path.abspath(self.path)) if self.path else None,
+            os.path.dirname(os.path.abspath(__file__)),
+            os.getcwd(),
         ]
-        sefd_path = next((p for p in candidates if os.path.exists(p)), candidates[0])
-        if not os.path.exists(sefd_path):
-            return sefd_table
-        with open(sefd_path, "r", encoding="utf-8") as f:
-            lines = [l.rstrip("\n") for l in f if l.strip() != ""]
-        if not lines:
-            return sefd_table
-        header = [v.strip() for v in lines[0].split("|")[1:]]
-        band_cm = []
-        for h in header:
-            try:
-                band_cm.append(float(h))
-            except ValueError:
-                band_cm.append(None)
-        band_hz = [(_band_cm_to_hz(cm) if cm is not None else None) for cm in band_cm]
-        for line in lines[1:]:
-            parts = [v.strip() for v in line.split("|")]
-            if not parts:
-                continue
-            station = parts[0]
-            if station == "":
-                continue
-            station_key = _normalize_station_key(station)
-            sefd_table.setdefault(station_key, {})
-            for hz, cell in zip(band_hz, parts[1:]):
-                if hz is None:
-                    continue
-                if cell == "":
-                    continue
-                try:
-                    sefd_table[station_key][hz] = float(cell)
-                except ValueError:
-                    continue
+        sefd_table, sefd_bands = _load_sefd_table_from_dirs(search_dirs)
+        self.sefd_bands = sefd_bands
         return sefd_table
 
     def _build_ui(self) -> None:
@@ -323,6 +346,7 @@ class AntabGui:
         self.undo_button.pack(fill=tk.X, pady=(0, 6))
         self._update_undo_button_state()
         ttk.Button(save_frame, text="Save", command=self._save).pack(fill=tk.X)
+        ttk.Button(save_frame, text="Generate Blank ANTAB...", command=self._open_generate_blank_dialog).pack(fill=tk.X, pady=(4, 0))
         ttk.Checkbutton(save_frame, text="Save to new file", variable=self.save_write_new,
                         command=self._toggle_save_output).pack(anchor=tk.W, padx=6, pady=(6, 0))
         ttk.Label(save_frame, text="Output path").pack(anchor=tk.W, padx=6, pady=(0, 2))
@@ -1266,6 +1290,9 @@ class AntabGui:
         self._clear_selection_masks()
         self._update_selected_scatter()
 
+    def _open_generate_blank_dialog(self) -> None:
+        GenerateBlankDialog(self.root, self.sefd_table, self.sefd_bands)
+
     def _save(self) -> None:
         if self.save_write_new.get():
             out_path = self._save_output_path()
@@ -1279,18 +1306,607 @@ class AntabGui:
         self._set_status(f"Saved to {self.path}")
 
 
+def _read_fits_idi_params(path: str) -> Dict:
+    """Read observation parameters from a single FITS-IDI file.
+
+    If the file has a SYSTEM_TEMPERATURE table, antennas and time range come
+    from it.  Otherwise (e.g. IDI2 with UV-only data) the active antennas are
+    decoded from UV_DATA baselines and the time range from UV_DATA DATE+TIME.
+    Times in the returned dict are fractional days relative to midnight of DATE-OBS.
+    """
+    try:
+        from astropy.io import fits as _fits
+    except ImportError:
+        raise RuntimeError("astropy is required to read FITS files.\nInstall with: pip install astropy")
+
+    import datetime as _dt
+
+    with _fits.open(path, memmap=True) as hdul:
+        ext_names = {h.name for h in hdul}
+
+        uv_hdr = hdul["UV_DATA"].header
+        date_obs: str = uv_hdr.get("DATE-OBS", "")
+        ref_freq_hz: float = float(uv_hdr.get("REF_FREQ", 0.0))
+        n_if: int = int(uv_hdr.get("NO_BAND", 1))
+
+        freq_row = hdul["FREQUENCY"].data[0]
+        band_offsets_hz = freq_row["BANDFREQ"]
+        total_bw_hz = freq_row["TOTAL_BANDWIDTH"]
+        if_freqs_hz = ref_freq_hz + band_offsets_hz
+        center_freq_hz = float((if_freqs_hz[0] + if_freqs_hz[-1] + total_bw_hz[-1]) / 2)
+        if_freqs_mhz = [float(f) / 1e6 for f in if_freqs_hz]
+
+        ant_data = hdul["ANTENNA"].data
+        ant_map: Dict[int, Tuple[str, str, str]] = {}
+        for row in ant_data:
+            ant_map[int(row["ANTENNA_NO"])] = (
+                row["ANNAME"].strip(),
+                row["POLTYA"].strip(),
+                row["POLTYB"].strip(),
+            )
+
+        if "SYSTEM_TEMPERATURE" in ext_names:
+            tsys_data = hdul["SYSTEM_TEMPERATURE"].data
+            active_ant_nos = sorted(set(int(a) for a in tsys_data["ANTENNA_NO"]))
+            time_start = float(tsys_data["TIME"].min())
+            time_end   = float(tsys_data["TIME"].max())
+        else:
+            # Fall back to UV_DATA baselines and DATE+TIME columns.
+            uv_data = hdul["UV_DATA"].data
+            baselines = uv_data["BASELINE"]
+            active_ant_nos = sorted(set(
+                [int(b) // 256 for b in baselines] + [int(b) % 256 for b in baselines]
+            ))
+            # UV_DATA times: DATE is JD of midnight, TIME is fractional day offset.
+            jd_midnight = (
+                _dt.date.fromisoformat(date_obs).toordinal()
+                - _dt.date(1858, 11, 17).toordinal()
+                + 2400000.5
+            ) if date_obs else 0.0
+            abs_frac = (uv_data["DATE"] - jd_midnight) + uv_data["TIME"]
+            time_start = float(abs_frac.min())
+            time_end   = float(abs_frac.max())
+
+        stations = [ant_map[a][0] for a in active_ant_nos if a in ant_map]
+        first_ant = active_ant_nos[0] if active_ant_nos else None
+        pol_a = ant_map[first_ant][1] if first_ant and first_ant in ant_map else "R"
+        pol_b = ant_map[first_ant][2] if first_ant and first_ant in ant_map else "L"
+
+    base_doy = 0
+    if date_obs:
+        try:
+            base_doy = _dt.datetime.strptime(date_obs, "%Y-%m-%d").timetuple().tm_yday
+        except ValueError:
+            pass
+
+    return {
+        "date_obs": date_obs,
+        "base_doy": base_doy,
+        "n_if": n_if,
+        "center_freq_hz": center_freq_hz,
+        "if_freqs_mhz": if_freqs_mhz,
+        "stations": stations,
+        "pol_a": pol_a,
+        "pol_b": pol_b,
+        "time_start_frac": time_start,
+        "time_end_frac": time_end,
+    }
+
+
+def _merge_fits_idi_params(paths: List[str]) -> Dict:
+    """Read and merge parameters from multiple FITS-IDI files.
+
+    Stations are the union across all files.  Frequency/IF/polarization come
+    from the first file that provides them.  Time range is the global min/max.
+    """
+    if not paths:
+        raise ValueError("No FITS files supplied.")
+    merged: Optional[Dict] = None
+    errors: List[str] = []
+    for p in paths:
+        try:
+            params = _read_fits_idi_params(p)
+        except Exception as exc:
+            errors.append(f"{os.path.basename(p)}: {exc}")
+            continue
+        if merged is None:
+            merged = dict(params)
+            merged["stations"] = list(params["stations"])
+        else:
+            # Union of stations (preserve order, no duplicates)
+            existing = {s.upper() for s in merged["stations"]}
+            for s in params["stations"]:
+                if s.upper() not in existing:
+                    merged["stations"].append(s)
+                    existing.add(s.upper())
+            # Expand time range
+            merged["time_start_frac"] = min(merged["time_start_frac"], params["time_start_frac"])
+            merged["time_end_frac"]   = max(merged["time_end_frac"],   params["time_end_frac"])
+            # Use first file's freq/IF/pol unless missing
+            if merged["center_freq_hz"] == 0.0 and params["center_freq_hz"] != 0.0:
+                merged["center_freq_hz"] = params["center_freq_hz"]
+                merged["if_freqs_mhz"]   = params["if_freqs_mhz"]
+            if merged["n_if"] == 0 and params["n_if"] > 0:
+                merged["n_if"] = params["n_if"]
+    if merged is None:
+        raise RuntimeError("Could not read any FITS file:\n" + "\n".join(errors))
+    merged["load_errors"] = errors
+    return merged
+
+
+class GenerateBlankDialog:
+    """Dialog for generating a blank ANTAB file with estimated SEFD values.
+
+    Parameters come from a FITS-IDI file (stations, frequency, IFs,
+    polarizations, time range). TSYS values are filled with SEFD estimates
+    from sefd_values.txt — no TSYS data is read from the FITS file.
+    """
+
+    MAX_ROWS = 50000
+
+    def __init__(
+        self,
+        parent: tk.Tk,
+        sefd_table: Dict[str, Dict[float, float]],
+        sefd_bands: List[Tuple[float, float]],
+    ) -> None:
+        self.parent = parent
+        self.sefd_table = sefd_table
+        self.sefd_bands = sefd_bands  # [(cm, hz), ...]
+
+        self.win = tk.Toplevel(parent)
+        self.win.title("Generate Blank ANTAB")
+        self.win.resizable(True, True)
+        self.win.grab_set()
+        self._build()
+
+    def _build(self) -> None:
+        outer = ttk.Frame(self.win, padding=10)
+        outer.pack(fill=tk.BOTH, expand=True)
+
+        # ---- FITS loading ----
+        fits_frame = ttk.LabelFrame(outer, text="Load parameters from FITS-IDI files")
+        fits_frame.grid(row=0, column=0, columnspan=3, sticky="ew", padx=4, pady=(0, 8))
+
+        fits_inner = ttk.Frame(fits_frame)
+        fits_inner.pack(fill=tk.BOTH, padx=6, pady=6)
+
+        # File list
+        list_col = ttk.Frame(fits_inner)
+        list_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.fits_listbox = tk.Listbox(list_col, selectmode=tk.EXTENDED, exportselection=False,
+                                       height=4, width=60)
+        fits_sb = ttk.Scrollbar(list_col, orient=tk.VERTICAL, command=self.fits_listbox.yview)
+        self.fits_listbox.configure(yscrollcommand=fits_sb.set)
+        self.fits_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        fits_sb.pack(side=tk.LEFT, fill=tk.Y)
+
+        # Buttons beside list
+        btn_col = ttk.Frame(fits_inner)
+        btn_col.pack(side=tk.LEFT, padx=(6, 0), anchor="n")
+        ttk.Button(btn_col, text="Add files…", command=self._browse_fits).pack(fill=tk.X, pady=2)
+        ttk.Button(btn_col, text="Remove selected", command=self._remove_fits).pack(fill=tk.X, pady=2)
+        ttk.Button(btn_col, text="Load from FITS", command=self._load_from_fits).pack(fill=tk.X, pady=(10, 2))
+
+        # Auto-detect IDI files in cwd or data/ directory
+        self._auto_add_fits_files()
+
+        frame = ttk.Frame(outer)
+        frame.grid(row=1, column=0, columnspan=3, sticky="nsew")
+        outer.rowconfigure(1, weight=1)
+        outer.columnconfigure(0, weight=1)
+        outer.columnconfigure(1, weight=1)
+        outer.columnconfigure(2, weight=1)
+
+        # ---- Stations ----
+        sta_frame = ttk.LabelFrame(frame, text="Stations")
+        sta_frame.grid(row=0, column=0, rowspan=2, sticky="nsew", padx=4, pady=4)
+
+        self.sta_listbox = tk.Listbox(sta_frame, selectmode=tk.EXTENDED, exportselection=False, width=10, height=16)
+        sta_sb = ttk.Scrollbar(sta_frame, orient=tk.VERTICAL, command=self.sta_listbox.yview)
+        self.sta_listbox.configure(yscrollcommand=sta_sb.set)
+        self.sta_listbox.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(4, 0), pady=4)
+        sta_sb.pack(side=tk.RIGHT, fill=tk.Y, pady=4, padx=(0, 4))
+
+        self._all_stations = sorted(self.sefd_table.keys())
+        for sta in self._all_stations:
+            self.sta_listbox.insert(tk.END, sta)
+
+        ttk.Button(sta_frame, text="Select All", command=lambda: self.sta_listbox.selection_set(0, tk.END)).pack(fill=tk.X, padx=4, pady=(0, 4))
+
+        # ---- Band / Frequency ----
+        bf_frame = ttk.LabelFrame(frame, text="Band / Frequency")
+        bf_frame.grid(row=0, column=1, sticky="new", padx=4, pady=4)
+
+        ttk.Label(bf_frame, text="Band (cm)").pack(anchor=tk.W, padx=6, pady=(6, 2))
+        self.band_var = tk.StringVar()
+        band_names = [f"{cm:g}" for cm, _ in self.sefd_bands]
+        self.band_combo = ttk.Combobox(bf_frame, textvariable=self.band_var, values=band_names, state="readonly", width=12)
+        if band_names:
+            self.band_combo.current(0)
+        self.band_combo.pack(fill=tk.X, padx=6)
+        self.band_combo.bind("<<ComboboxSelected>>", self._on_band_change)
+
+        ttk.Label(bf_frame, text="Center frequency (MHz)").pack(anchor=tk.W, padx=6, pady=(6, 2))
+        self.freq_var = tk.StringVar()
+        ttk.Entry(bf_frame, textvariable=self.freq_var, width=14).pack(fill=tk.X, padx=6, pady=(0, 6))
+
+        if self.sefd_bands:
+            self._update_freq_from_hz(self.sefd_bands[0][1])
+
+        # ---- Index Pattern ----
+        idx_frame = ttk.LabelFrame(frame, text="Index Pattern")
+        idx_frame.grid(row=1, column=1, sticky="new", padx=4, pady=4)
+
+        self.pol_l_var = tk.BooleanVar(value=True)
+        self.pol_r_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(idx_frame, text="L polarization", variable=self.pol_l_var).pack(anchor=tk.W, padx=6, pady=2)
+        ttk.Checkbutton(idx_frame, text="R polarization", variable=self.pol_r_var).pack(anchor=tk.W, padx=6, pady=2)
+
+        ttk.Label(idx_frame, text="Number of IFs").pack(anchor=tk.W, padx=6, pady=(6, 2))
+        self.nif_var = tk.StringVar(value="8")
+        ttk.Entry(idx_frame, textvariable=self.nif_var, width=8).pack(anchor=tk.W, padx=6)
+
+        ttk.Label(idx_frame, text="Starting IF number").pack(anchor=tk.W, padx=6, pady=(6, 2))
+        self.if_start_var = tk.StringVar(value="1")
+        ttk.Entry(idx_frame, textvariable=self.if_start_var, width=8).pack(anchor=tk.W, padx=6, pady=(0, 6))
+
+        # ---- Time Range ----
+        time_frame = ttk.LabelFrame(frame, text="Time Range")
+        time_frame.grid(row=0, column=2, sticky="new", padx=4, pady=4)
+
+        for label, attr, default in [
+            ("Start DOY", "start_doy_var", "001"),
+            ("Start time (HH:MM:SS)", "start_time_var", "00:00:00"),
+            ("End DOY", "end_doy_var", "001"),
+            ("End time (HH:MM:SS)", "end_time_var", "23:59:00"),
+            ("Interval (minutes)", "interval_var", "5"),
+        ]:
+            ttk.Label(time_frame, text=label).pack(anchor=tk.W, padx=6, pady=(6, 2))
+            var = tk.StringVar(value=default)
+            setattr(self, attr, var)
+            ttk.Entry(time_frame, textvariable=var, width=14).pack(fill=tk.X, padx=6)
+
+        # ---- Output ----
+        out_frame = ttk.LabelFrame(frame, text="Output")
+        out_frame.grid(row=1, column=2, sticky="new", padx=4, pady=4)
+
+        ttk.Label(out_frame, text="Output path").pack(anchor=tk.W, padx=6, pady=(6, 2))
+        self.out_var = tk.StringVar(value="blank.antab")
+        out_row = ttk.Frame(out_frame)
+        out_row.pack(fill=tk.X, padx=6)
+        ttk.Entry(out_row, textvariable=self.out_var).pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ttk.Button(out_row, text="...", width=3, command=self._browse_output).pack(side=tk.LEFT, padx=(4, 0))
+
+        # ---- Status / Buttons ----
+        self.dlg_status_var = tk.StringVar(value="")
+        ttk.Label(outer, textvariable=self.dlg_status_var, wraplength=580).grid(
+            row=2, column=0, columnspan=3, sticky="w", padx=4, pady=(6, 0)
+        )
+
+        btn_frame = ttk.Frame(outer)
+        btn_frame.grid(row=3, column=0, columnspan=3, sticky="e", padx=4, pady=6)
+        ttk.Button(btn_frame, text="Close", command=self.win.destroy).pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(btn_frame, text="Generate", command=self._generate).pack(side=tk.RIGHT)
+
+        frame.columnconfigure(0, weight=1)
+        frame.columnconfigure(1, weight=1)
+        frame.columnconfigure(2, weight=1)
+
+    # ---- FITS loading ----
+
+    @staticmethod
+    def _is_fits_idi(name: str) -> bool:
+        upper = name.upper()
+        return (
+            upper.endswith((".IDI", ".FITS"))
+            or upper.endswith((".IDI1", ".IDI2", ".IDI3", ".IDI4"))
+            or ("IDI" in upper and not upper.endswith(".PY"))
+        )
+
+    def _auto_add_fits_files(self) -> None:
+        found: List[str] = []
+        for name in sorted(os.listdir(".")):
+            if os.path.isfile(name) and self._is_fits_idi(name):
+                found.append(name)
+        if not found:
+            data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data")
+            if os.path.isdir(data_dir):
+                for name in sorted(os.listdir(data_dir)):
+                    full = os.path.join(data_dir, name)
+                    if os.path.isfile(full) and self._is_fits_idi(name):
+                        found.append(full)
+        for p in found:
+            self.fits_listbox.insert(tk.END, p)
+
+    def _browse_fits(self) -> None:
+        paths = filedialog.askopenfilenames(
+            parent=self.win,
+            title="Select FITS-IDI files",
+            filetypes=[
+                ("FITS-IDI files", "*.IDI *.IDI1 *.IDI2 *.IDI3 *.IDI4 *.fits *.FITS"),
+                ("All files", "*.*"),
+            ],
+        )
+        existing = set(self.fits_listbox.get(0, tk.END))
+        for p in paths:
+            if p not in existing:
+                self.fits_listbox.insert(tk.END, p)
+                existing.add(p)
+
+    def _remove_fits(self) -> None:
+        for i in reversed(self.fits_listbox.curselection()):
+            self.fits_listbox.delete(i)
+
+    def _load_from_fits(self) -> None:
+        paths = list(self.fits_listbox.get(0, tk.END))
+        if not paths:
+            self.dlg_status_var.set("Add at least one FITS-IDI file to the list first.")
+            return
+        missing = [p for p in paths if not os.path.exists(p)]
+        if missing:
+            self.dlg_status_var.set(f"File(s) not found: {', '.join(missing)}")
+            return
+        try:
+            params = _merge_fits_idi_params(paths)
+        except Exception as exc:
+            self.dlg_status_var.set(f"Error reading FITS: {exc}")
+            return
+
+        # --- Stations ---
+        fits_stations_upper = {s.upper() for s in params["stations"]}
+        self.sta_listbox.selection_clear(0, tk.END)
+        for i, sta in enumerate(self._all_stations):
+            if sta.upper() in fits_stations_upper:
+                self.sta_listbox.selection_set(i)
+
+        # --- Frequency: pick nearest band in SEFD table ---
+        center_hz = params["center_freq_hz"]
+        if self.sefd_bands:
+            nearest_cm, nearest_hz = min(self.sefd_bands, key=lambda bnd: abs(bnd[1] - center_hz))
+            band_names = [f"{cm:g}" for cm, _ in self.sefd_bands]
+            key = f"{nearest_cm:g}"
+            if key in band_names:
+                self.band_combo.current(band_names.index(key))
+        self.freq_var.set(f"{center_hz / 1e6:.2f}")
+
+        # --- Index pattern ---
+        self.nif_var.set(str(params["n_if"]))
+        self.if_start_var.set("1")
+        self.pol_l_var.set("L" in (params["pol_a"], params["pol_b"]))
+        self.pol_r_var.set("R" in (params["pol_a"], params["pol_b"]))
+
+        # --- Time range ---
+        base_doy = params["base_doy"]
+        t0 = params["time_start_frac"]
+        t1 = params["time_end_frac"]
+        d0 = base_doy + int(t0);  s0 = int((t0 % 1) * 86400)
+        d1 = base_doy + int(t1);  s1 = int((t1 % 1) * 86400)
+        self.start_doy_var.set(str(d0).zfill(3))
+        self.start_time_var.set(self._seconds_to_time_str(s0))
+        self.end_doy_var.set(str(d1).zfill(3))
+        self.end_time_var.set(self._seconds_to_time_str(s1))
+
+        n_files = len(paths)
+        n_fits = len(params["stations"])
+        n_sefd = sum(1 for s in params["stations"] if s.upper() in {k.upper() for k in self.sefd_table})
+        msg = (
+            f"Merged {n_files} file(s): {n_fits} station(s) ({n_sefd} in SEFD table), "
+            f"{params['n_if']} IFs, center freq {center_hz / 1e6:.1f} MHz, "
+            f"DATE-OBS {params['date_obs']}."
+        )
+        if params.get("load_errors"):
+            msg += "  Warnings: " + "; ".join(params["load_errors"])
+        self.dlg_status_var.set(msg)
+
+    # ---- helpers ----
+
+    def _on_band_change(self, event=None) -> None:
+        raw = self.band_var.get().strip()
+        try:
+            cm = float(raw)
+        except ValueError:
+            return
+        self._update_freq_from_hz(_band_cm_to_hz(cm))
+
+    def _update_freq_from_hz(self, hz: float) -> None:
+        self.freq_var.set(f"{hz / 1e6:.2f}")
+
+    def _browse_output(self) -> None:
+        path = filedialog.asksaveasfilename(
+            parent=self.win,
+            title="Save blank ANTAB as",
+            defaultextension=".antab",
+            filetypes=[("ANTAB files", "*.antab"), ("All files", "*.*")],
+        )
+        if path:
+            self.out_var.set(path)
+
+    def _get_selected_stations(self) -> List[str]:
+        return [self.sta_listbox.get(i) for i in self.sta_listbox.curselection()]
+
+    def _build_index_list(self) -> List[str]:
+        try:
+            nif = int(self.nif_var.get().strip())
+            if_start = int(self.if_start_var.get().strip())
+        except ValueError:
+            return []
+        if nif <= 0:
+            return []
+        pols = []
+        if self.pol_l_var.get():
+            pols.append("L")
+        if self.pol_r_var.get():
+            pols.append("R")
+        return [f"{pol}{i}" for pol in pols for i in range(if_start, if_start + nif)]
+
+    def _parse_time_seconds(self, time_str: str) -> Optional[int]:
+        parts = time_str.strip().split(":")
+        if len(parts) != 3:
+            return None
+        try:
+            h, m, s = int(parts[0]), int(parts[1]), int(parts[2])
+            return h * 3600 + m * 60 + s
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _seconds_to_time_str(seconds: int) -> str:
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        s = seconds % 60
+        return f"{h:02d}:{m:02d}:{s:02d}"
+
+    def _generate_time_rows(self) -> Optional[List[Tuple[str, str]]]:
+        try:
+            start_doy = int(self.start_doy_var.get().strip())
+            end_doy = int(self.end_doy_var.get().strip())
+        except ValueError:
+            self.dlg_status_var.set("Invalid DOY value.")
+            return None
+        start_secs = self._parse_time_seconds(self.start_time_var.get())
+        end_secs = self._parse_time_seconds(self.end_time_var.get())
+        if start_secs is None:
+            self.dlg_status_var.set("Invalid start time. Use HH:MM:SS.")
+            return None
+        if end_secs is None:
+            self.dlg_status_var.set("Invalid end time. Use HH:MM:SS.")
+            return None
+        try:
+            interval_min = float(self.interval_var.get().strip())
+            if interval_min <= 0:
+                raise ValueError
+        except ValueError:
+            self.dlg_status_var.set("Interval must be a positive number.")
+            return None
+        interval_secs = max(1, int(round(interval_min * 60)))
+        cur_total = start_doy * 86400 + start_secs
+        end_total = end_doy * 86400 + end_secs
+        if cur_total > end_total:
+            self.dlg_status_var.set("Start time is after end time.")
+            return None
+        rows: List[Tuple[str, str]] = []
+        while cur_total <= end_total:
+            doy = cur_total // 86400
+            secs = cur_total % 86400
+            rows.append((str(doy).zfill(3), self._seconds_to_time_str(secs)))
+            cur_total += interval_secs
+            if len(rows) > self.MAX_ROWS:
+                self.dlg_status_var.set(
+                    f"Time range exceeds {self.MAX_ROWS} rows. Reduce the range or increase the interval."
+                )
+                return None
+        if not rows:
+            self.dlg_status_var.set("No rows generated. Check time range and interval.")
+            return None
+        return rows
+
+    def _generate(self) -> None:
+        stations = self._get_selected_stations()
+        if not stations:
+            self.dlg_status_var.set("Select at least one station.")
+            return
+        indices = self._build_index_list()
+        if not indices:
+            self.dlg_status_var.set("Select at least one polarization and set number of IFs > 0.")
+            return
+        try:
+            freq_mhz = float(self.freq_var.get().strip())
+        except ValueError:
+            self.dlg_status_var.set("Invalid frequency.")
+            return
+        freq_hz = freq_mhz * 1e6
+        time_rows = self._generate_time_rows()
+        if time_rows is None:
+            return
+        out_path = self.out_var.get().strip()
+        if not out_path:
+            self.dlg_status_var.set("Enter output path.")
+            return
+
+        index_str = ", ".join(f"'{name}'" for name in indices)
+        lines: List[str] = []
+        missing_sefd: List[str] = []
+
+        for station in stations:
+            sefd_map = self.sefd_table.get(station, {})
+            if sefd_map:
+                nearest_hz = min(sefd_map.keys(), key=lambda f: abs(f - freq_hz))
+                sefd_jy: Optional[float] = sefd_map[nearest_hz]
+            else:
+                sefd_jy = None
+                missing_sefd.append(station)
+
+            lines += [
+                f"GAIN {station}",
+                "ELEV",
+                "DPFU = 1",
+                "POLY = 1",
+                f"FREQ = {freq_mhz:g}",
+                "/",
+                f"TSYS {station}",
+                "FT = 1",
+                "TIMEOFF = 0",
+                f"INDEX = {index_str}",
+                "/",
+            ]
+            val_str = (
+                " ".join(f"{sefd_jy:.1f}" for _ in indices)
+                if sefd_jy is not None
+                else " ".join(f"{MISSING_VALUE:.1f}" for _ in indices)
+            )
+            for doy_str, time_str in time_rows:
+                lines.append(f"{doy_str} {time_str} {val_str}")
+            lines.append("/")
+
+        try:
+            with open(out_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+        except OSError as exc:
+            self.dlg_status_var.set(f"Error writing file: {exc}")
+            return
+
+        msg = (
+            f"Saved {out_path}: {len(stations)} station(s), {len(indices)} indices, "
+            f"{len(time_rows)} time rows."
+        )
+        if missing_sefd:
+            msg += f" No SEFD for: {', '.join(missing_sefd)} (used {MISSING_VALUE:.1f})."
+        self.dlg_status_var.set(msg)
+
+
 def main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(description="GUI ANTAB editor with multi-plot selection")
     parser.add_argument("path", nargs="?", help=".antab file path")
     args = parser.parse_args(argv)
 
     path = args.path or first_antab_in_cwd()
-    if not path:
-        print("No .antab file found. Provide a path.")
-        return 1
-    if not os.path.exists(path):
-        print(f"File not found: {path}")
-        return 1
+
+    # No antab file available: open a standalone Generate Blank dialog so the
+    # user can create one from FITS-IDI data, then load the result.
+    if not path or not os.path.exists(path):
+        root = tk.Tk()
+        root.withdraw()  # hide the empty root window
+
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        sefd_table, sefd_bands = _load_sefd_table_from_dirs([script_dir, os.getcwd()])
+
+        dlg = GenerateBlankDialog(root, sefd_table, sefd_bands)
+        # wait_window enters a local event loop and returns the moment dlg.win
+        # is destroyed — by the Close button, the X button, or anything else.
+        # This avoids the mainloop() hang that occurs when no windows remain.
+        root.wait_window(dlg.win)
+
+        generated = first_antab_in_cwd()
+        if generated and os.path.exists(generated):
+            segments = parse_antab(generated)
+            try:
+                root.deiconify()
+                AntabGui(root, generated, segments)
+                root.mainloop()
+            except RuntimeError as exc:
+                print(str(exc))
+        return 0
 
     segments = parse_antab(path)
     root = tk.Tk()

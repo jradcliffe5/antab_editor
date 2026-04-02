@@ -42,6 +42,52 @@ It gives you a GUI for interactive cleanup and editing, plus shared parsing/writ
 ./antab_editor.py ek053a.antab
 ```
 
+## Examples
+
+### Edit an existing ANTAB file
+
+```bash
+./antab_editor.py ek053a.antab
+```
+
+Opens the GUI with `ek053a.antab` loaded. If no path is given and a single `.antab`
+file exists in the current directory, it is loaded automatically.
+
+### Generate a blank ANTAB from FITS-IDI files
+
+```bash
+cd /path/to/experiment
+./antab_editor.py
+```
+
+With no `.antab` file present, the **Generate Blank ANTAB** dialog opens automatically.
+
+1. Click **Add files…** and select your FITS-IDI files (or let the tool auto-detect
+   them if they are in the current directory or a `data/` subdirectory).
+2. Click **Load from FITS** — stations, frequency, IFs, and the observation time range
+   are populated from the file headers.
+3. Choose which stations and band to include, set the time interval, and click
+   **Generate**. The result is saved as `blank.antab` (editable before saving).
+4. The editor then opens automatically with the generated file.
+
+### Clean up noisy TSYS values
+
+1. Open the file and select a station block from the left panel.
+2. Click or drag on the plot to select outlier points.
+3. Use **Replace Selected** to overwrite them, or **Blank Selected** to set them to
+   `-99.0` (missing), then **Interpolate Blanks** to fill in from neighbors.
+4. Preview smoothing with the **Smoothing** controls, then **Apply Smoothing** if
+   satisfied.
+5. Press `Ctrl+Z` (or `Cmd+Z`) to undo any single step if needed.
+6. **Save** to overwrite in place, or **Save As** to write a new file.
+
+### Apply expected TSYS to a selection
+
+1. Select the points you want to replace on the plot.
+2. Click **Apply Expected\*DPFU to Selection** — values are replaced with SEFD
+   estimates from `sefd_values.txt` using the station frequency.
+3. To apply to the entire block instead, use **Apply Expected TSYS (whole antenna)**.
+
 ## Notes
 
 - Use `-99.0` for missing values. Missing values are excluded from plotting and smoothing.

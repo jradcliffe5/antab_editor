@@ -179,16 +179,16 @@ def _parse_gain_info(path: str) -> Dict[str, Dict[str, List[float]]]:
 
 
 class AntabGui:
-    def __init__(self, root: tk.Tk, path: str, segments) -> None:
+    def __init__(self, root: tk.Tk, path: str = None, segments=None) -> None:
         self.root = root
         self.path = path
-        self.segments = segments
-        self.blocks: List[TsysBlock] = [seg.block for seg in segments if isinstance(seg, TsysSegment)]
-        if not self.blocks:
-            raise RuntimeError("No TSYS blocks found in file.")
+        self.segments = segments or []
+        self.blocks: List[TsysBlock] = [
+            seg.block for seg in self.segments if isinstance(seg, TsysSegment)
+        ]
 
-        self.block_index = 0
-        self.block = self.blocks[self.block_index]
+        self.block_index = 0 if self.blocks else -1
+        self.block = self.blocks[0] if self.blocks else None
 
         self.xs: np.ndarray = np.array([], dtype=float)
         self.rows: List[DataRow] = []
@@ -198,7 +198,7 @@ class AntabGui:
         self.max_table_rows = 3000
         self.table_sync_skipped = False
         self.table_sync_rows = 0
-        self.gain_info = _parse_gain_info(path)
+        self.gain_info = _parse_gain_info(path) if path else {}
         self.sefd_bands: List[Tuple[float, float]] = []
         self.sefd_table = self._load_sefd_table()
 
@@ -222,7 +222,8 @@ class AntabGui:
         self.undo_button = None
 
         self._build_ui()
-        self._load_block(0)
+        if self.blocks:
+            self._load_block(0)
 
     def _load_sefd_table(self) -> Dict[str, Dict[float, float]]:
         search_dirs = [
@@ -235,8 +236,16 @@ class AntabGui:
         return sefd_table
 
     def _build_ui(self) -> None:
-        self.root.title("ANTAB GUI Editor")
+        self.root.title(
+            f"ANTAB GUI Editor — {os.path.basename(self.path)}" if self.path else "ANTAB GUI Editor"
+        )
         self.root.geometry("1200x750")
+        self.root.update_idletasks()
+        sw = self.root.winfo_screenwidth()
+        sh = self.root.winfo_screenheight()
+        x = max(0, (sw - 1200) // 2)
+        y = max(0, (sh - 750) // 2)
+        self.root.geometry(f"1200x750+{x}+{y}")
 
         self.main = ttk.Frame(self.root, padding=6)
         self.main.pack(fill=tk.BOTH, expand=True)
@@ -284,7 +293,8 @@ class AntabGui:
         self.block_var = tk.StringVar()
         block_names = [f"{i}: {b.station}" for i, b in enumerate(self.blocks)]
         self.block_combo = ttk.Combobox(block_frame, textvariable=self.block_var, values=block_names, state="readonly")
-        self.block_combo.current(0)
+        if self.blocks:
+            self.block_combo.current(0)
         self.block_combo.pack(fill=tk.X, padx=6, pady=6)
         self.block_combo.bind("<<ComboboxSelected>>", self._on_block_change)
 
@@ -354,6 +364,11 @@ class AntabGui:
         ttk.Checkbutton(smooth_frame, text="Preview", variable=self.smooth_enabled,
                         command=self._update_plot).pack(anchor=tk.W, padx=6, pady=4)
         ttk.Button(smooth_frame, text="Apply Smoothing", command=self._apply_smoothing).pack(fill=tk.X, padx=6, pady=(0, 6))
+
+        file_frame = ttk.LabelFrame(self.left, text="File")
+        file_frame.pack(fill=tk.X, pady=(8, 0))
+        ttk.Button(file_frame, text="Open File…", command=self._open_file).pack(fill=tk.X, padx=6, pady=(6, 2))
+        ttk.Button(file_frame, text="Generate Blank ANTAB…", command=self._open_generate_blank_dialog).pack(fill=tk.X, padx=6, pady=(0, 6))
 
         save_frame = ttk.LabelFrame(self.left, text="Save")
         save_frame.pack(fill=tk.X, pady=(8, 0))
@@ -1304,6 +1319,35 @@ class AntabGui:
     def _clear_selection(self) -> None:
         self._clear_selection_masks()
         self._update_selected_scatter()
+
+    def _open_file(self) -> None:
+        path = filedialog.askopenfilename(
+            parent=self.root,
+            title="Open ANTAB file",
+            filetypes=[("ANTAB files", "*.antab"), ("All files", "*.*")],
+        )
+        if not path or not os.path.exists(path):
+            return
+        try:
+            segments = parse_antab(path)
+        except Exception as exc:
+            self._set_status(f"Failed to open {path}: {exc}")
+            return
+        self.path = path
+        self.segments = segments
+        self.blocks = [seg.block for seg in segments if isinstance(seg, TsysSegment)]
+        if not self.blocks:
+            self._set_status(f"No TSYS blocks found in {path}.")
+            return
+        self.gain_info = _parse_gain_info(path)
+        self.sefd_table = self._load_sefd_table()
+        self.undo_snapshot = None
+        self._update_undo_button_state()
+        self.root.title(f"ANTAB GUI Editor — {os.path.basename(path)}")
+        block_names = [f"{i}: {b.station}" for i, b in enumerate(self.blocks)]
+        self.block_combo.configure(values=block_names)
+        self._load_block(0)
+        self._set_status(f"Opened {os.path.basename(path)}")
 
     def _open_generate_blank_dialog(self) -> None:
         GenerateBlankDialog(self.root, self.sefd_table, self.sefd_bands)
@@ -2371,37 +2415,16 @@ Non-interactive examples (no display required):
     # ------------------------------------------------------------------ #
     _import_gui_deps()
 
-    path = args.path or first_antab_in_cwd()
+    path = args.path
 
-    # No antab file: open the Generate Blank dialog, then load the result.
-    if not path or not os.path.exists(path):
-        root = tk.Tk()
-        root.withdraw()
-
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        sefd_table, sefd_bands = _load_sefd_table_from_dirs([script_dir, os.getcwd()])
-
-        dlg = GenerateBlankDialog(root, sefd_table, sefd_bands)
-        root.wait_window(dlg.win)
-
-        generated = first_antab_in_cwd()
-        if generated and os.path.exists(generated):
-            segments = parse_antab(generated)
-            try:
-                root.deiconify()
-                AntabGui(root, generated, segments)
-                root.mainloop()
-            except RuntimeError as exc:
-                print(str(exc))
-        return 0
-
-    segments = parse_antab(path)
     root = tk.Tk()
-    try:
+    if path and os.path.exists(path):
+        segments = parse_antab(path)
         AntabGui(root, path, segments)
-    except RuntimeError as exc:
-        print(str(exc))
-        return 1
+    else:
+        # No file given — open the editor in empty state.
+        # Use "Open File…" or "Generate Blank ANTAB…" from inside the GUI.
+        AntabGui(root)
     root.mainloop()
     return 0
 

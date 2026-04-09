@@ -55,8 +55,8 @@ batch mode for scripted or headless use — both via the same script.
 ./antab_editor.py ek053a.antab
 ```
 
-Opens the GUI with `ek053a.antab` loaded. If no path is given and a single `.antab`
-file exists in the current directory, it is loaded automatically.
+Opens the GUI with `ek053a.antab` loaded. If no path is given, a file picker
+dialog appears so you can choose the file to open.
 
 ### Generate a blank ANTAB from FITS-IDI files (GUI)
 

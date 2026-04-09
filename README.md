@@ -1,20 +1,21 @@
 # ANTAB Editor
 
 This project is a small local toolkit for working with ANTAB TSYS tables.  
-It gives you a GUI for interactive cleanup and editing, plus shared parsing/writing helpers.
+It gives you a GUI for interactive cleanup and editing, and a non-interactive
+batch mode for scripted or headless use — both via the same script.
 
 ## What's Included
 
-- `antab_editor.py`: Main GUI editor. Includes plotting, table editing, selection tools, smoothing, expected TSYS fill, undo, interpolation, and FITS-IDI parameter loading.
-- `antab_io.py`: Shared ANTAB parsing and writing helpers used by the GUI.
+- `antab_editor.py`: GUI editor and batch processor. Pass batch flags to skip
+  the GUI entirely; omit them to open the interactive editor.
+- `antab_io.py`: Shared ANTAB parsing and writing helpers.
 
 ## Requirements
 
 - Python 3.x
 - `numpy`
-- `matplotlib`
-- `tkinter` (usually bundled with Python on macOS)
-- `astropy` (optional — required only for FITS-IDI parameter loading)
+- `matplotlib` and `tkinter` (GUI mode only — usually bundled with Python on macOS)
+- `astropy` (optional — required only for `--from-fits`)
 
 ## Project Files
 
@@ -39,12 +40,16 @@ It gives you a GUI for interactive cleanup and editing, plus shared parsing/writ
 ## Quick Start
 
 ```bash
+# Open the GUI
 ./antab_editor.py ek053a.antab
+
+# Batch mode — no display needed
+./antab_editor.py ek053a.antab --expected-tsys -o out.antab
 ```
 
 ## Examples
 
-### Edit an existing ANTAB file
+### Edit an existing ANTAB file (GUI)
 
 ```bash
 ./antab_editor.py ek053a.antab
@@ -53,7 +58,7 @@ It gives you a GUI for interactive cleanup and editing, plus shared parsing/writ
 Opens the GUI with `ek053a.antab` loaded. If no path is given and a single `.antab`
 file exists in the current directory, it is loaded automatically.
 
-### Generate a blank ANTAB from FITS-IDI files
+### Generate a blank ANTAB from FITS-IDI files (GUI)
 
 ```bash
 cd /path/to/experiment
@@ -70,7 +75,7 @@ With no `.antab` file present, the **Generate Blank ANTAB** dialog opens automat
    **Generate**. The result is saved as `blank.antab` (editable before saving).
 4. The editor then opens automatically with the generated file.
 
-### Clean up noisy TSYS values
+### Clean up noisy TSYS values (GUI)
 
 1. Open the file and select a station block from the left panel.
 2. Click or drag on the plot to select outlier points.
@@ -81,12 +86,42 @@ With no `.antab` file present, the **Generate Blank ANTAB** dialog opens automat
 5. Press `Ctrl+Z` (or `Cmd+Z`) to undo any single step if needed.
 6. **Save** to overwrite in place, or **Save As** to write a new file.
 
-### Apply expected TSYS to a selection
+### Apply expected TSYS to a selection (GUI)
 
 1. Select the points you want to replace on the plot.
 2. Click **Apply Expected\*DPFU to Selection** — values are replaced with SEFD
    estimates from `sefd_values.txt` using the station frequency.
 3. To apply to the entire block instead, use **Apply Expected TSYS (whole antenna)**.
+
+### Non-interactive / scripted use
+
+Any batch flag triggers non-interactive mode — tkinter and matplotlib are never
+imported, so no display is required:
+
+```bash
+# Apply expected TSYS to all stations
+./antab_editor.py input.antab --expected-tsys -o output.antab
+
+# Smooth with a 5-minute median window
+./antab_editor.py input.antab --smooth median 5 -o output.antab
+
+# Chain: expected TSYS → interpolate blanks → smooth (applied in that order)
+./antab_editor.py input.antab --expected-tsys --interpolate --smooth gaussian 5 -o output.antab
+
+# Process only one station
+./antab_editor.py input.antab --smooth mean 10 --station EF -o output.antab
+
+# Generate a blank ANTAB from FITS-IDI files (astropy required)
+./antab_editor.py --from-fits scan*.fits --interval 1 -o blank.antab
+
+# Generate from FITS and immediately smooth
+./antab_editor.py --from-fits scan*.fits --interval 1 --smooth median 5 -o output.antab
+
+# Override stations, polarizations, or band when generating from FITS
+./antab_editor.py --from-fits scan*.fits --stations EF,WB,MC --pols RL --band 6 --interval 2 -o output.antab
+```
+
+Run `./antab_editor.py --help` for the full option list.
 
 ## Notes
 

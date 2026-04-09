@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 import argparse
 import copy
 import math
@@ -6,24 +7,37 @@ import os
 import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-try:
-    import tkinter as tk
-    from tkinter import ttk, filedialog
-except Exception as exc:
-    print("tkinter is required for this tool.")
-    print(f"Import error: {exc}")
-    raise SystemExit(1)
+# tkinter and matplotlib are imported lazily in _import_gui_deps(), called only
+# when the GUI is actually launched.  This lets the module be used non-interactively
+# (e.g. CLI batch mode) without requiring a display or those packages.
+tk = ttk = filedialog = None  # populated by _import_gui_deps()
+matplotlib = FigureCanvasTkAgg = NavigationToolbar2Tk = Figure = RectangleSelector = None
 
-try:
-    import matplotlib
-    matplotlib.use("TkAgg")
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-    from matplotlib.figure import Figure
-    from matplotlib.widgets import RectangleSelector
-except Exception as exc:
-    print("matplotlib is required for this tool.")
-    print(f"Import error: {exc}")
-    raise SystemExit(1)
+
+def _import_gui_deps() -> None:
+    """Import tkinter and matplotlib into module globals."""
+    global tk, ttk, filedialog
+    global matplotlib, FigureCanvasTkAgg, NavigationToolbar2Tk, Figure, RectangleSelector
+    try:
+        import tkinter as _tk
+        from tkinter import ttk as _ttk, filedialog as _fd
+        tk, ttk, filedialog = _tk, _ttk, _fd
+    except Exception as exc:
+        print(f"tkinter is required for the GUI: {exc}")
+        raise SystemExit(1)
+    try:
+        import matplotlib as _mpl
+        _mpl.use("TkAgg")
+        from matplotlib.backends.backend_tkagg import (
+            FigureCanvasTkAgg as _FCA, NavigationToolbar2Tk as _NT2
+        )
+        from matplotlib.figure import Figure as _Figure
+        from matplotlib.widgets import RectangleSelector as _RS
+        matplotlib, FigureCanvasTkAgg, NavigationToolbar2Tk = _mpl, _FCA, _NT2
+        Figure, RectangleSelector = _Figure, _RS
+    except Exception as exc:
+        print(f"matplotlib is required for the GUI: {exc}")
+        raise SystemExit(1)
 
 import numpy as np
 
@@ -131,6 +145,39 @@ def _load_sefd_table_from_dirs(
     return sefd_table, sefd_bands
 
 
+def _parse_gain_info(path: str) -> Dict[str, Dict[str, List[float]]]:
+    gain_info: Dict[str, Dict[str, List[float]]] = {}
+    if not os.path.exists(path):
+        return gain_info
+    with open(path, "r", encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    i = 0
+    while i < len(lines):
+        line = lines[i].strip()
+        parts = line.split()
+        if parts and parts[0].upper() == "GAIN":
+            station = _normalize_station_key(parts[1]) if len(parts) > 1 else ""
+            dpfu_vals: List[float] = []
+            freq_vals: List[float] = []
+            poly_vals: List[float] = []
+            i += 1
+            while i < len(lines) and lines[i].strip() != "/":
+                l = lines[i].strip()
+                key = l.split("=", 1)[0].strip().upper() if l else ""
+                if key == "DPFU":
+                    dpfu_vals = _parse_float_list(l)
+                elif key == "FREQ":
+                    freq_vals = _parse_float_list(l)
+                elif key == "POLY":
+                    poly_vals = _parse_float_list(l)
+                i += 1
+            if station:
+                gain_info[station] = {"dpfu": dpfu_vals, "freq": freq_vals, "poly": poly_vals}
+        else:
+            i += 1
+    return gain_info
+
+
 class AntabGui:
     def __init__(self, root: tk.Tk, path: str, segments) -> None:
         self.root = root
@@ -151,7 +198,7 @@ class AntabGui:
         self.max_table_rows = 3000
         self.table_sync_skipped = False
         self.table_sync_rows = 0
-        self.gain_info = self._parse_gain_info(path)
+        self.gain_info = _parse_gain_info(path)
         self.sefd_bands: List[Tuple[float, float]] = []
         self.sefd_table = self._load_sefd_table()
 
@@ -176,38 +223,6 @@ class AntabGui:
 
         self._build_ui()
         self._load_block(0)
-
-    def _parse_gain_info(self, path: str) -> Dict[str, Dict[str, List[float]]]:
-        gain_info: Dict[str, Dict[str, List[float]]] = {}
-        if not os.path.exists(path):
-            return gain_info
-        with open(path, "r", encoding="utf-8") as f:
-            lines = f.read().splitlines()
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            parts = line.split()
-            if parts and parts[0].upper() == "GAIN":
-                station = _normalize_station_key(parts[1]) if len(parts) > 1 else ""
-                dpfu_vals: List[float] = []
-                freq_vals: List[float] = []
-                poly_vals: List[float] = []
-                i += 1
-                while i < len(lines) and lines[i].strip() != "/":
-                    l = lines[i].strip()
-                    key = l.split("=", 1)[0].strip().upper() if l else ""
-                    if key == "DPFU":
-                        dpfu_vals = _parse_float_list(l)
-                    elif key == "FREQ":
-                        freq_vals = _parse_float_list(l)
-                    elif key == "POLY":
-                        poly_vals = _parse_float_list(l)
-                    i += 1
-                if station:
-                    gain_info[station] = {"dpfu": dpfu_vals, "freq": freq_vals, "poly": poly_vals}
-            else:
-                i += 1
-        return gain_info
 
     def _load_sefd_table(self) -> Dict[str, Dict[float, float]]:
         search_dirs = [
@@ -1434,6 +1449,369 @@ def _merge_fits_idi_params(paths: List[str]) -> Dict:
     return merged
 
 
+# ---------------------------------------------------------------------------
+# Batch / non-interactive operations
+# These are standalone functions (not methods) so they work without the GUI.
+# ---------------------------------------------------------------------------
+
+def _block_rows_xs(block: TsysBlock):
+    """Return (rows, xs) from a TsysBlock without needing an AntabGui instance."""
+    rows: List[DataRow] = []
+    xs_list: List[float] = []
+    for row in block.data_rows:
+        if isinstance(row, DataRow):
+            rows.append(row)
+            xs_list.append(parse_time(row.day, row.time))
+    return rows, np.asarray(xs_list, dtype=float)
+
+
+def _build_series_batch(rows: List[DataRow], block: TsysBlock, index_name: str) -> np.ndarray:
+    idx = block.index.index(index_name)
+    ys = np.full(len(rows), np.nan, dtype=float)
+    for i, row in enumerate(rows):
+        if idx >= len(row.values):
+            continue
+        val = row.values[idx].strip()
+        if not val:
+            continue
+        try:
+            fval = float(val)
+            if fval != MISSING_VALUE:
+                ys[i] = fval
+        except ValueError:
+            pass
+    return ys
+
+
+def _smooth_series_batch(xs: np.ndarray, ys: np.ndarray, window_days: float, method: str) -> np.ndarray:
+    if window_days <= 0:
+        return np.full_like(ys, np.nan)
+    mask = np.isfinite(ys)
+    if not mask.any():
+        return np.full_like(ys, np.nan)
+    x_valid = xs[mask]
+    y_valid = ys[mask]
+    n = x_valid.size
+    half = window_days / 2.0
+    smoothed_valid = np.full(n, np.nan, dtype=float)
+    if method == "mean":
+        for i in range(n):
+            xi = x_valid[i]
+            l = int(np.searchsorted(x_valid, xi - half, side="left"))
+            r = int(np.searchsorted(x_valid, xi + half, side="right"))
+            if r > l:
+                smoothed_valid[i] = float(np.mean(y_valid[l:r]))
+    elif method == "median":
+        for i in range(n):
+            xi = x_valid[i]
+            l = int(np.searchsorted(x_valid, xi - half, side="left"))
+            r = int(np.searchsorted(x_valid, xi + half, side="right"))
+            if r > l:
+                smoothed_valid[i] = float(np.median(y_valid[l:r]))
+    else:  # gaussian
+        sigma = window_days / 2.355
+        if sigma <= 0:
+            return np.full_like(ys, np.nan)
+        for i in range(n):
+            xi = x_valid[i]
+            l = int(np.searchsorted(x_valid, xi - half, side="left"))
+            r = int(np.searchsorted(x_valid, xi + half, side="right"))
+            if r <= l:
+                continue
+            dt = x_valid[l:r] - xi
+            w = np.exp(-0.5 * (dt / sigma) ** 2)
+            wsum = float(np.sum(w))
+            if wsum > 0:
+                smoothed_valid[i] = float(np.sum(w * y_valid[l:r]) / wsum)
+    smoothed = np.full_like(ys, np.nan)
+    smoothed[mask] = smoothed_valid
+    return smoothed
+
+
+def _interpolate_missing_batch(xs: np.ndarray, ys: np.ndarray) -> np.ndarray:
+    out = ys.copy()
+    finite = np.isfinite(ys)
+    if np.count_nonzero(finite) < 2:
+        return out
+    x_valid = xs[finite]
+    y_valid = ys[finite]
+    order = np.argsort(x_valid)
+    x_valid = x_valid[order]
+    y_valid = y_valid[order]
+    fill_mask = (~finite) & (xs >= x_valid[0]) & (xs <= x_valid[-1])
+    if fill_mask.any():
+        out[fill_mask] = np.interp(xs[fill_mask], x_valid, y_valid)
+    return out
+
+
+def _missing_entry_mask_batch(rows: List[DataRow], idx: int) -> np.ndarray:
+    mask = np.zeros(len(rows), dtype=bool)
+    for i, row in enumerate(rows):
+        if idx >= len(row.values):
+            mask[i] = True
+            continue
+        raw = row.values[idx].strip()
+        if not raw:
+            mask[i] = True
+            continue
+        try:
+            mask[i] = float(raw) == MISSING_VALUE
+        except ValueError:
+            pass
+    return mask
+
+
+def _set_gain_line_batch(lines: List[str], start: int, end: int, key: str, values: List[float]) -> Tuple[int, bool]:
+    text = _format_float_list(values)
+    for i in range(start, end):
+        raw = lines[i]
+        head = raw.strip().split("=", 1)[0].strip().upper() if raw.strip() else ""
+        if head == key:
+            indent = raw[: len(raw) - len(raw.lstrip())]
+            new_line = f"{indent}{key} = {text}"
+            if lines[i] != new_line:
+                lines[i] = new_line
+                return end, True
+            return end, False
+    lines.insert(end, f"{key} = {text}")
+    return end + 1, True
+
+
+def _set_dpfu_to_one(segments: List, station: str, gain_info: Dict) -> None:
+    station = _normalize_station_key(station)
+    dpfu_count = max(1, len(gain_info.get(station, {}).get("dpfu", [])))
+    dpfu_vals = [1.0] * dpfu_count
+    for seg in segments:
+        if not isinstance(seg, RawSegment):
+            continue
+        lines = seg.lines
+        i = 0
+        while i < len(lines):
+            parts = lines[i].strip().split()
+            if len(parts) >= 2 and parts[0].upper() == "GAIN" and _normalize_station_key(parts[1]) == station:
+                end = i + 1
+                while end < len(lines) and lines[end].strip() != "/":
+                    end += 1
+                _set_gain_line_batch(lines, i + 1, end, "DPFU", dpfu_vals)
+                i = end
+            i += 1
+    gain_info.setdefault(station, {"dpfu": [], "freq": [], "poly": []})["dpfu"] = dpfu_vals
+
+
+def _expected_tsys_batch(block: TsysBlock, index_name: str, gain_info: Dict, sefd_table: Dict) -> Optional[float]:
+    station_key = _normalize_station_key(block.station)
+    gain = gain_info.get(station_key)
+    if not gain:
+        return None
+    dpfu_vals = gain.get("dpfu", [])
+    freq_vals = gain.get("freq", [])
+    if not freq_vals:
+        return None
+    freq_hz = (sum(freq_vals) / len(freq_vals)) * 1e6
+    sefd_map = sefd_table.get(station_key)
+    if not sefd_map:
+        return None
+    nearest = min(sefd_map.keys(), key=lambda f: abs(f - freq_hz))
+    if not dpfu_vals:
+        return None
+    upper = index_name.upper()
+    if len(dpfu_vals) == 1:
+        dpfu = dpfu_vals[0]
+    elif "R" in upper and "L" not in upper:
+        dpfu = dpfu_vals[0]
+    elif "L" in upper and "R" not in upper:
+        dpfu = dpfu_vals[1] if len(dpfu_vals) > 1 else dpfu_vals[0]
+    else:
+        dpfu = dpfu_vals[0]
+    return dpfu * sefd_map[nearest]
+
+
+def op_expected_tsys(segments: List, gain_info: Dict, sefd_table: Dict, station_filter: Optional[str] = None) -> None:
+    for seg in segments:
+        if not isinstance(seg, TsysSegment):
+            continue
+        block = seg.block
+        if station_filter and _normalize_station_key(block.station) != station_filter:
+            continue
+        rows, _ = _block_rows_xs(block)
+        applied = 0
+        for index_name in block.index:
+            expected = _expected_tsys_batch(block, index_name, gain_info, sefd_table)
+            if expected is None:
+                continue
+            idx = block.index.index(index_name)
+            for row in rows:
+                while len(row.values) <= idx:
+                    row.values.append("")
+                row.values[idx] = f"{expected:.1f}"
+            applied += 1
+        if applied:
+            _set_dpfu_to_one(segments, block.station, gain_info)
+            print(f"  {block.station}: applied expected TSYS to {applied} indices, set DPFU=1")
+        else:
+            print(f"  {block.station}: no SEFD/GAIN data — skipped", file=sys.stderr)
+
+
+def op_interpolate(segments: List, station_filter: Optional[str] = None) -> None:
+    for seg in segments:
+        if not isinstance(seg, TsysSegment):
+            continue
+        block = seg.block
+        if station_filter and _normalize_station_key(block.station) != station_filter:
+            continue
+        rows, xs = _block_rows_xs(block)
+        total = 0
+        for index_name in block.index:
+            idx = block.index.index(index_name)
+            ys = _build_series_batch(rows, block, index_name)
+            interp = _interpolate_missing_batch(xs, ys)
+            fill_mask = _missing_entry_mask_batch(rows, idx) & np.isfinite(interp)
+            for row_idx in np.where(fill_mask)[0]:
+                row = rows[int(row_idx)]
+                while len(row.values) <= idx:
+                    row.values.append("")
+                row.values[idx] = f"{interp[row_idx]:.1f}"
+            total += int(fill_mask.sum())
+        print(f"  {block.station}: interpolated {total} blank points")
+
+
+def op_smooth(segments: List, method: str, window_minutes: float, station_filter: Optional[str] = None) -> None:
+    window_days = window_minutes / (24 * 60)
+    for seg in segments:
+        if not isinstance(seg, TsysSegment):
+            continue
+        block = seg.block
+        if station_filter and _normalize_station_key(block.station) != station_filter:
+            continue
+        rows, xs = _block_rows_xs(block)
+        total = 0
+        for index_name in block.index:
+            idx = block.index.index(index_name)
+            ys = _build_series_batch(rows, block, index_name)
+            smooth = _smooth_series_batch(xs, ys, window_days, method)
+            mask = np.isfinite(ys) & np.isfinite(smooth)
+            for row_idx in np.where(mask)[0]:
+                row = rows[int(row_idx)]
+                while len(row.values) <= idx:
+                    row.values.append("")
+                row.values[idx] = f"{smooth[row_idx]:.1f}"
+            total += int(mask.sum())
+        print(f"  {block.station}: smoothed {total} values ({method}, {window_minutes:.1f} min)")
+
+
+def _seconds_to_time_str_fn(seconds: int) -> str:
+    h, m, s = seconds // 3600, (seconds % 3600) // 60, seconds % 60
+    return f"{h:02d}:{m:02d}:{s:02d}"
+
+
+def _gen_time_rows(
+    start_doy: int, start_secs: int,
+    end_doy: int, end_secs: int,
+    interval_secs: int,
+    max_rows: int = 50000,
+) -> List[Tuple[str, str]]:
+    cur = start_doy * 86400 + start_secs
+    end = end_doy * 86400 + end_secs
+    if cur > end:
+        raise ValueError("Start time is after end time.")
+    rows: List[Tuple[str, str]] = []
+    while cur <= end:
+        rows.append((str(cur // 86400).zfill(3), _seconds_to_time_str_fn(cur % 86400)))
+        cur += interval_secs
+        if len(rows) > max_rows:
+            raise ValueError(f"Time range exceeds {max_rows} rows. Reduce range or increase --interval.")
+    if not rows:
+        raise ValueError("No time rows generated. Check time range and interval.")
+    return rows
+
+
+def generate_blank(
+    fits_paths: List[str],
+    out_path: str,
+    sefd_table: Dict,
+    sefd_bands: List,
+    stations_override: Optional[List[str]] = None,
+    pols_override: Optional[str] = None,
+    nif_override: Optional[int] = None,
+    if_start: int = 1,
+    band_cm_override: Optional[float] = None,
+    interval_min: float = 1.0,
+) -> None:
+    params = _merge_fits_idi_params(fits_paths)
+    if params.get("load_errors"):
+        for e in params["load_errors"]:
+            print(f"  Warning: {e}", file=sys.stderr)
+
+    if stations_override:
+        stations = [_normalize_station_key(s) for s in stations_override]
+    else:
+        all_stations = [_normalize_station_key(s) for s in params["stations"]]
+        in_sefd = [s for s in all_stations if s in sefd_table]
+        stations = in_sefd if in_sefd else all_stations
+
+    if band_cm_override is not None:
+        freq_hz = _band_cm_to_hz(band_cm_override)
+    elif sefd_bands and params["center_freq_hz"]:
+        _, freq_hz = min(sefd_bands, key=lambda b: abs(b[1] - params["center_freq_hz"]))
+    else:
+        freq_hz = params["center_freq_hz"]
+    freq_mhz = freq_hz / 1e6
+
+    nif = nif_override if nif_override is not None else params["n_if"]
+    if pols_override is not None:
+        pols = list(pols_override.upper())
+    else:
+        pols = []
+        for p in (params["pol_a"], params["pol_b"]):
+            if p in ("R", "L") and p not in pols:
+                pols.append(p)
+        if not pols:
+            pols = ["R", "L"]
+    indices = [f"{pol}{i}" for pol in pols for i in range(if_start, if_start + nif)]
+
+    base_doy = params["base_doy"]
+    t0 = params["time_start_frac"]
+    t1 = params["time_end_frac"]
+    d0, s0 = base_doy + int(t0), int((t0 % 1) * 86400)
+    d1, s1 = base_doy + int(t1), int((t1 % 1) * 86400)
+    time_rows = _gen_time_rows(d0, s0, d1, s1, max(1, int(round(interval_min * 60))))
+
+    index_str = ", ".join(f"'{name}'" for name in indices)
+    lines: List[str] = []
+    missing_sefd: List[str] = []
+
+    for station in stations:
+        sefd_map = sefd_table.get(station, {})
+        if sefd_map:
+            nearest_hz = min(sefd_map.keys(), key=lambda f: abs(f - freq_hz))
+            sefd_jy: Optional[float] = sefd_map[nearest_hz]
+        else:
+            sefd_jy = None
+            missing_sefd.append(station)
+        val_str = (
+            " ".join(f"{sefd_jy:.1f}" for _ in indices)
+            if sefd_jy is not None
+            else " ".join(f"{MISSING_VALUE:.1f}" for _ in indices)
+        )
+        lines += [
+            f"GAIN {station}", "ELEV", "DPFU = 1", "POLY = 1", f"FREQ = {freq_mhz:g}", "/",
+            f"TSYS {station}", "FT = 1", "TIMEOFF = 0", f"INDEX = {index_str}", "/",
+        ]
+        for doy_str, time_str in time_rows:
+            lines.append(f"{doy_str} {time_str} {val_str}")
+        lines.append("/")
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+
+    print(
+        f"Generated {out_path}: {len(stations)} station(s), {len(indices)} indices, "
+        f"{len(time_rows)} time rows, {freq_mhz:.1f} MHz."
+    )
+    if missing_sefd:
+        print(f"  No SEFD data for: {', '.join(missing_sefd)} — used {MISSING_VALUE:.1f}.", file=sys.stderr)
+
+
 class GenerateBlankDialog:
     """Dialog for generating a blank ANTAB file with estimated SEFD values.
 
@@ -1876,25 +2254,134 @@ class GenerateBlankDialog:
 
 
 def main(argv: List[str]) -> int:
-    parser = argparse.ArgumentParser(description="GUI ANTAB editor with multi-plot selection")
+    parser = argparse.ArgumentParser(
+        description="ANTAB editor — GUI by default, or non-interactive with batch flags.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Non-interactive examples (no display required):
+  antab_editor.py input.antab --expected-tsys -o output.antab
+  antab_editor.py input.antab --smooth median 5 -o output.antab
+  antab_editor.py input.antab --expected-tsys --interpolate --smooth gaussian 5 -o output.antab
+  antab_editor.py --from-fits scan*.fits --interval 1 --expected-tsys -o output.antab
+""",
+    )
     parser.add_argument("path", nargs="?", help=".antab file path")
+    # ---- FITS generation ----
+    parser.add_argument("--from-fits", nargs="+", metavar="FILE",
+                        help="Generate a blank ANTAB from one or more FITS-IDI files (non-interactive)")
+    parser.add_argument("--stations", metavar="STA,STA,...",
+                        help="Comma-separated station list for --from-fits (default: all in FITS)")
+    parser.add_argument("--pols", metavar="POLS",
+                        help="Polarizations for --from-fits, e.g. RL, R, L (default: from FITS)")
+    parser.add_argument("--nif", type=int, metavar="N",
+                        help="Number of IFs for --from-fits (default: from FITS)")
+    parser.add_argument("--if-start", type=int, default=1, metavar="N",
+                        help="First IF number for --from-fits (default: 1)")
+    parser.add_argument("--band", type=float, metavar="CM",
+                        help="Wavelength in cm for frequency lookup in --from-fits")
+    parser.add_argument("--interval", type=float, default=1.0, metavar="MIN",
+                        help="Time interval in minutes for --from-fits (default: 1)")
+    # ---- batch operations ----
+    parser.add_argument("--expected-tsys", action="store_true",
+                        help="Replace TSYS values with SEFD * DPFU; sets DPFU=1 (non-interactive)")
+    parser.add_argument("--smooth", nargs=2, metavar=("METHOD", "MIN"),
+                        help="Smooth data: METHOD is mean/median/gaussian, MIN is window in minutes")
+    parser.add_argument("--interpolate", action="store_true",
+                        help="Interpolate blank (-99.0) values between valid neighbours")
+    parser.add_argument("--station", metavar="STA",
+                        help="Restrict batch operations to this station only")
+    parser.add_argument("-o", "--output", metavar="FILE",
+                        help="Output path for batch mode (default: overwrite input)")
     args = parser.parse_args(argv)
+
+    batch_mode = bool(args.from_fits or args.expected_tsys or args.smooth or args.interpolate)
+
+    # ------------------------------------------------------------------ #
+    #  Batch / non-interactive path                                        #
+    # ------------------------------------------------------------------ #
+    if batch_mode:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        sefd_table, sefd_bands = _load_sefd_table_from_dirs([script_dir, os.getcwd()])
+        antab_path = args.path
+        out_path = args.output
+
+        if args.from_fits:
+            generated = out_path or "blank.antab"
+            stations_override = [s.strip() for s in args.stations.split(",")] if args.stations else None
+            try:
+                generate_blank(
+                    fits_paths=args.from_fits,
+                    out_path=generated,
+                    sefd_table=sefd_table,
+                    sefd_bands=sefd_bands,
+                    stations_override=stations_override,
+                    pols_override=args.pols,
+                    nif_override=args.nif,
+                    if_start=args.if_start,
+                    band_cm_override=args.band,
+                    interval_min=args.interval,
+                )
+            except Exception as exc:
+                print(f"Error: {exc}", file=sys.stderr)
+                return 1
+            if not (args.expected_tsys or args.smooth or args.interpolate):
+                return 0
+            antab_path = generated
+            out_path = out_path or generated
+
+        if not antab_path:
+            parser.error("Provide an .antab file path, or use --from-fits.")
+        if not os.path.exists(antab_path):
+            print(f"File not found: {antab_path}", file=sys.stderr)
+            return 1
+
+        segments = parse_antab(antab_path)
+        gain_info = _parse_gain_info(antab_path)
+        out_path = out_path or antab_path
+        station_filter = _normalize_station_key(args.station) if args.station else None
+
+        if args.expected_tsys:
+            print("Applying expected TSYS...")
+            op_expected_tsys(segments, gain_info, sefd_table, station_filter)
+
+        if args.interpolate:
+            print("Interpolating blanks...")
+            op_interpolate(segments, station_filter)
+
+        if args.smooth:
+            method_raw, window_raw = args.smooth
+            method = method_raw.lower()
+            if method not in ("mean", "median", "gaussian"):
+                print(f"Unknown smooth method '{method_raw}'. Choose: mean, median, gaussian.", file=sys.stderr)
+                return 1
+            try:
+                window_min = float(window_raw)
+            except ValueError:
+                print(f"Invalid smooth window '{window_raw}' — must be a number (minutes).", file=sys.stderr)
+                return 1
+            print(f"Smoothing ({method}, {window_min:.1f} min)...")
+            op_smooth(segments, method, window_min, station_filter)
+
+        write_antab(out_path, segments)
+        print(f"Saved: {out_path}")
+        return 0
+
+    # ------------------------------------------------------------------ #
+    #  GUI path                                                            #
+    # ------------------------------------------------------------------ #
+    _import_gui_deps()
 
     path = args.path or first_antab_in_cwd()
 
-    # No antab file available: open a standalone Generate Blank dialog so the
-    # user can create one from FITS-IDI data, then load the result.
+    # No antab file: open the Generate Blank dialog, then load the result.
     if not path or not os.path.exists(path):
         root = tk.Tk()
-        root.withdraw()  # hide the empty root window
+        root.withdraw()
 
         script_dir = os.path.dirname(os.path.abspath(__file__))
         sefd_table, sefd_bands = _load_sefd_table_from_dirs([script_dir, os.getcwd()])
 
         dlg = GenerateBlankDialog(root, sefd_table, sefd_bands)
-        # wait_window enters a local event loop and returns the moment dlg.win
-        # is destroyed — by the Close button, the X button, or anything else.
-        # This avoids the mainloop() hang that occurs when no windows remain.
         root.wait_window(dlg.win)
 
         generated = first_antab_in_cwd()

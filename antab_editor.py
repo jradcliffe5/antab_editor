@@ -55,8 +55,13 @@ def first_antab_in_cwd() -> Optional[str]:
 
 
 def parse_time(day: str, time: str) -> float:
-    h, m, s = time.split(":")
-    seconds = int(h) * 3600 + int(m) * 60 + int(s)
+    if "." in time:
+        # HH:MM.FF format (fractional minutes, e.g. 08:00.25 = 8h 15s)
+        h_str, rest = time.split(":", 1)
+        seconds = int(h_str) * 3600 + float(rest) * 60
+    else:
+        h, m, s = time.split(":")
+        seconds = int(h) * 3600 + int(m) * 60 + int(s)
     return int(day) + (seconds / 86400.0)
 
 def _parse_float_list(text: str) -> List[float]:
@@ -2417,8 +2422,12 @@ Non-interactive examples (no display required):
 
     path = args.path
 
+    if path and not os.path.exists(path):
+        print(f"File not found: {path}", file=sys.stderr)
+        return 1
+
     root = tk.Tk()
-    if path and os.path.exists(path):
+    if path:
         segments = parse_antab(path)
         AntabGui(root, path, segments)
     else:

@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Union
 
 INDEX_RE = re.compile(r"'([^']+)'")
-DATA_RE = re.compile(r"^\s*(\d{1,3})\s+(\d{2}:\d{2}:\d{2})\s+(.*)$")
+DATA_RE = re.compile(r"^\s*(\d{1,3})\s+(\d{2}:\d{2}[:.]\d{2})\s+(.*)$")
 
 
 @dataclass
